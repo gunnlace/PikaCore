@@ -13,11 +13,6 @@ import subprocess
 import threading
 from .base import Tool
 
-# Track cwd across commands (Claude Code does this too). Thread-local, so that
-# when the agent executes tools in parallel two bash calls never race on one
-# shared global: each worker thread carries its own cwd. See article 05.
-_local = threading.local()
-
 # patterns that could wreck the filesystem or leak secrets
 _DANGEROUS_PATTERNS = [
     # recursive delete aimed at root/home (force flag optional)
@@ -57,6 +52,12 @@ class BashTool(Tool):
         "required": ["command"],
     }
 
+    def __init__(self, workspace=None):
+        super().__init__(workspace=workspace)
+        # cwd belongs to this tool/workspace. Thread-local storage additionally
+        # keeps parallel calls on one Agent from racing with each other.
+        self._local = threading.local()
+
     def execute(self, command: str, timeout: int = 120) -> str:
         # safety check
         warning = _check_dangerous(command)
@@ -64,7 +65,7 @@ class BashTool(Tool):
             return f"⚠ Blocked: {warning}\nCommand: {command}\nIf intentional, modify the command to be more specific."
 
         # use this thread's own tracked working directory
-        cwd = getattr(_local, "cwd", None) or os.getcwd()
+        cwd = getattr(self._local, "cwd", None) or str(self.workspace_context.repo_root)
 
         try:
             proc = subprocess.run(
@@ -80,7 +81,9 @@ class BashTool(Tool):
 
             # track cd commands so next command runs in the right place
             if proc.returncode == 0:
-                _update_cwd(command, cwd)
+                updated_cwd = _updated_cwd(command, cwd)
+                if updated_cwd is not None:
+                    self._local.cwd = updated_cwd
             out = proc.stdout
             if proc.stderr:
                 out += f"\n[stderr]\n{proc.stderr}"
@@ -108,8 +111,8 @@ def _check_dangerous(cmd: str) -> str | None:
     return None
 
 
-def _update_cwd(command: str, current_cwd: str):
-    """Track directory changes from cd commands, per thread."""
+def _updated_cwd(command: str, current_cwd: str) -> str | None:
+    """Return the directory reached by successful ``cd`` commands, if any."""
     # walk each cd in a && chain, resolving relative targets against the dir the
     # previous cd landed in (not the original cwd) so `cd a && cd b` ends in a/b
     running = current_cwd
@@ -123,5 +126,4 @@ def _update_cwd(command: str, current_cwd: str):
                 if os.path.isdir(new_dir):
                     running = new_dir
                     changed = True
-    if changed:
-        _local.cwd = running
+    return running if changed else None

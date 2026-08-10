@@ -1,7 +1,6 @@
 """Content search with regex support."""
 
 import re
-from pathlib import Path
 from .base import Tool
 
 # skip these dirs to avoid noise
@@ -39,7 +38,10 @@ class GrepTool(Tool):
         except re.error as e:
             return f"Invalid regex: {e}"
 
-        base = Path(path).expanduser().resolve()
+        try:
+            base = self.resolve_path(path)
+        except ValueError as e:
+            return f"Error: {e}"
         if not base.exists():
             return f"Error: {path} not found"
 
@@ -63,8 +65,7 @@ class GrepTool(Tool):
 
         return "\n".join(matches) if matches else "No matches found."
 
-    @staticmethod
-    def _walk(root: Path, include: str | None) -> list[Path]:
+    def _walk(self, root, include: str | None) -> list:
         """Walk dir tree, skipping junk dirs."""
         results = []
         for item in root.rglob(include or "*"):
@@ -72,8 +73,12 @@ class GrepTool(Tool):
             # also catch an ancestor named e.g. "build" and hide the whole tree
             if any(part in _SKIP_DIRS for part in item.relative_to(root).parts):
                 continue
-            if item.is_file():
-                results.append(item)
+            try:
+                safe_item = self.resolve_path(str(item))
+            except ValueError:
+                continue
+            if safe_item.is_file():
+                results.append(safe_item)
             if len(results) >= 5000:
                 break
         return results

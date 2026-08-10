@@ -4,6 +4,11 @@ import os
 import sys
 
 from pikacore.tools import ALL_TOOLS, get_tool
+from pikacore.workspace import WorkspaceContext
+
+
+def _workspace_tool(name, root):
+    return type(get_tool(name))(workspace=WorkspaceContext(root))
 
 
 def test_tool_count():
@@ -94,28 +99,24 @@ def test_bash_chained_cd_resolves_sequentially(tmp_path):
     import pikacore.tools.bash as bash_mod
 
     (tmp_path / "a" / "b").mkdir(parents=True)
-    saved = getattr(bash_mod._local, "cwd", None)
-    try:
-        bash_mod._local.cwd = None
-        bash_mod._update_cwd(f"cd {tmp_path} && cd a && cd b", str(tmp_path))
-        assert bash_mod._local.cwd == os.path.normpath(str(tmp_path / "a" / "b"))
-    finally:
-        bash_mod._local.cwd = saved
+    updated = bash_mod._updated_cwd(f"cd {tmp_path} && cd a && cd b", str(tmp_path))
+    assert updated == os.path.normpath(str(tmp_path / "a" / "b"))
 
 
 def test_bash_cwd_is_thread_local(tmp_path):
     """Parallel bash calls must not race on a shared cwd: each thread tracks its own."""
     import threading
 
-    import pikacore.tools.bash as bash_mod
+    from pikacore.tools.bash import BashTool
 
     (tmp_path / "ta").mkdir()
     (tmp_path / "tb").mkdir()
+    bash = BashTool(workspace=WorkspaceContext(tmp_path))
     seen = {}
 
     def worker(name, target):
-        bash_mod._update_cwd(f"cd {target}", str(tmp_path))
-        seen[name] = getattr(bash_mod._local, "cwd", None)
+        bash.execute(command=f'cd "{target}"')
+        seen[name] = getattr(bash._local, "cwd", None)
 
     threads = [
         threading.Thread(target=worker, args=("a", tmp_path / "ta")),
@@ -131,6 +132,23 @@ def test_bash_cwd_is_thread_local(tmp_path):
     assert seen["b"] == os.path.normpath(str(tmp_path / "tb"))
 
 
+def test_bash_cwd_is_isolated_between_tool_instances(tmp_path):
+    """One Agent's cd must not move another Agent, even on the same thread."""
+    from pikacore.tools.bash import BashTool
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / "sub").mkdir(parents=True)
+    repo_b.mkdir()
+    bash_a = BashTool(workspace=WorkspaceContext(repo_a))
+    bash_b = BashTool(workspace=WorkspaceContext(repo_b))
+
+    bash_a.execute(command="cd sub")
+
+    assert bash_a.execute(command="pwd") == str(repo_a / "sub")
+    assert bash_b.execute(command="pwd") == str(repo_b)
+
+
 def test_bash_truncates_long_output():
     bash = get_tool("bash")
     r = bash.execute(command=f'"{sys.executable}" -c "print(\'x\' * 20000)"')
@@ -140,7 +158,7 @@ def test_bash_truncates_long_output():
 # --- read_file ---
 
 def test_read_file(tmp_path):
-    read = get_tool("read_file")
+    read = _workspace_tool("read_file", tmp_path)
     path = tmp_path / "sample.txt"
     path.write_text("line1\nline2\nline3\n")
     r = read.execute(file_path=str(path))
@@ -155,7 +173,7 @@ def test_read_file_not_found():
 
 
 def test_read_file_offset_limit(tmp_path):
-    read = get_tool("read_file")
+    read = _workspace_tool("read_file", tmp_path)
     path = tmp_path / "sample.txt"
     path.write_text("\n".join(f"line{i}" for i in range(100)), encoding="utf-8")
     r = read.execute(file_path=str(path), offset=10, limit=5)
@@ -171,8 +189,8 @@ def test_read_write_unicode_roundtrip(tmp_path):
     (Line endings may be normalised to \\r\\n on Windows - that's text-mode
     behaviour orthogonal to the encoding, so this checks content, not raw bytes.)
     """
-    write = get_tool("write_file")
-    read = get_tool("read_file")
+    write = _workspace_tool("write_file", tmp_path)
+    read = _workspace_tool("read_file", tmp_path)
     path = tmp_path / "zh.txt"
     write.execute(file_path=str(path), content="第一行\n第二行\n")
     raw = path.read_bytes()
@@ -186,7 +204,7 @@ def test_read_write_unicode_roundtrip(tmp_path):
 # --- write_file ---
 
 def test_write_file(tmp_path):
-    write = get_tool("write_file")
+    write = _workspace_tool("write_file", tmp_path)
     path = tmp_path / "out.txt"
     r = write.execute(file_path=str(path), content="hello world\n")
     assert "Wrote" in r
@@ -194,7 +212,7 @@ def test_write_file(tmp_path):
 
 
 def test_write_file_creates_dirs(tmp_path):
-    write = get_tool("write_file")
+    write = _workspace_tool("write_file", tmp_path)
     nested = tmp_path / "sub" / "dir" / "file.txt"
     r = write.execute(file_path=str(nested), content="nested\n")
     assert "Wrote" in r
@@ -204,7 +222,7 @@ def test_write_file_creates_dirs(tmp_path):
 # --- edit_file ---
 
 def test_edit_file_basic(tmp_path):
-    edit = get_tool("edit_file")
+    edit = _workspace_tool("edit_file", tmp_path)
     path = tmp_path / "sample.py"
     path.write_text("def foo():\n    return 42\n")
     r = edit.execute(file_path=str(path), old_string="return 42", new_string="return 99")
@@ -216,7 +234,7 @@ def test_edit_file_basic(tmp_path):
 
 
 def test_edit_file_not_found_string(tmp_path):
-    edit = get_tool("edit_file")
+    edit = _workspace_tool("edit_file", tmp_path)
     path = tmp_path / "sample.py"
     path.write_text("hello\n")
     r = edit.execute(file_path=str(path), old_string="NONEXISTENT", new_string="x")
@@ -224,7 +242,7 @@ def test_edit_file_not_found_string(tmp_path):
 
 
 def test_edit_file_duplicate_string(tmp_path):
-    edit = get_tool("edit_file")
+    edit = _workspace_tool("edit_file", tmp_path)
     path = tmp_path / "sample.py"
     path.write_text("dup\ndup\n")
     r = edit.execute(file_path=str(path), old_string="dup", new_string="x")
@@ -233,7 +251,7 @@ def test_edit_file_duplicate_string(tmp_path):
 
 def test_edit_file_rejects_non_utf8(tmp_path):
     """A non-UTF-8 / binary file must yield a clean error, not a traceback."""
-    edit = get_tool("edit_file")
+    edit = _workspace_tool("edit_file", tmp_path)
     path = tmp_path / "latin.txt"
     path.write_bytes("café".encode("latin-1"))  # 0xe9 is invalid UTF-8
     r = edit.execute(file_path=str(path), old_string="caf", new_string="x")
@@ -279,7 +297,7 @@ def test_grep_searches_under_skip_named_ancestor(tmp_path):
     root = tmp_path / "build" / "proj"  # 'build' is in _SKIP_DIRS
     root.mkdir(parents=True)
     (root / "code.py").write_text("needle here\n", encoding="utf-8")
-    grep = get_tool("grep")
+    grep = _workspace_tool("grep", root)
     r = grep.execute(pattern="needle", path=str(root))
     assert "needle" in r
 
@@ -289,7 +307,7 @@ def test_grep_skips_junk_dirs_inside_root(tmp_path):
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "junk.py").write_text("needle\n", encoding="utf-8")
     (tmp_path / "real.py").write_text("needle\n", encoding="utf-8")
-    grep = get_tool("grep")
+    grep = _workspace_tool("grep", tmp_path)
     r = grep.execute(pattern="needle", path=str(tmp_path))
     assert "real.py" in r
     assert "node_modules" not in r
