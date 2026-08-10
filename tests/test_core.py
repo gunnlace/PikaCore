@@ -1,14 +1,19 @@
 """Tests for core modules: config, context, session, imports."""
 
-from corecoder import Agent, LLM, Config, ALL_TOOLS, __version__
-from corecoder import session as session_module
-from corecoder.context import ContextManager, estimate_tokens
-from corecoder.session import save_session, load_session, list_sessions
-from corecoder.tools import get_tool
+import sys
+
+import pytest
+
+from pikacore import Agent, LLM, Config, ALL_TOOLS, __version__
+from pikacore import session as session_module
+from pikacore.cli import _parse_args
+from pikacore.context import ContextManager, estimate_tokens
+from pikacore.session import save_session, load_session, list_sessions
+from pikacore.tools import get_tool
 
 
 def test_version():
-    assert __version__ == "0.4.0"
+    assert __version__ == "0.1.0"
 
 
 def test_public_api_exports():
@@ -20,13 +25,71 @@ def test_public_api_exports():
 
 
 def test_config_from_env(monkeypatch):
-    monkeypatch.setenv("CORECODER_MODEL", "test-model")
+    monkeypatch.setenv("PIKACORE_MODEL", "test-model")
     c = Config.from_env()
     assert c.model == "test-model"
 
 
+def test_config_prefers_pikacore_env_and_supports_corecoder_fallback(monkeypatch):
+    monkeypatch.setenv("PIKACORE_MODEL", "new-model")
+    monkeypatch.setenv("CORECODER_MODEL", "legacy-model")
+    assert Config.from_env().model == "new-model"
+
+    monkeypatch.delenv("PIKACORE_MODEL")
+    assert Config.from_env().model == "legacy-model"
+
+
+def test_config_keeps_openai_env_and_legacy_api_key_is_last_fallback(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("PIKACORE_API_KEY", "new-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("CORECODER_API_KEY", "legacy-key")
+    assert Config.from_env().api_key == "new-key"
+
+    monkeypatch.delenv("PIKACORE_API_KEY")
+    assert Config.from_env().api_key == "openai-key"
+
+    monkeypatch.delenv("OPENAI_API_KEY")
+    assert Config.from_env().api_key == "legacy-key"
+
+
+@pytest.mark.parametrize(
+    ("primary", "legacy", "attribute", "primary_value", "primary_expected", "legacy_expected"),
+    [
+        ("PIKACORE_MAX_TOKENS", "CORECODER_MAX_TOKENS", "max_tokens", "8192", 8192, 2048),
+        ("PIKACORE_TEMPERATURE", "CORECODER_TEMPERATURE", "temperature", "0.5", 0.5, 0.25),
+        ("PIKACORE_MAX_CONTEXT", "CORECODER_MAX_CONTEXT", "max_context_tokens", "64000", 64000, 32000),
+        ("PIKACORE_PROVIDER", "CORECODER_PROVIDER", "provider", "litellm", "litellm", "openai"),
+    ],
+)
+def test_config_uses_legacy_fallback_only_when_primary_is_absent(
+    monkeypatch, primary, legacy, attribute, primary_value, primary_expected, legacy_expected
+):
+    monkeypatch.setenv(primary, primary_value)
+    monkeypatch.setenv(legacy, str(legacy_expected))
+    assert getattr(Config.from_env(), attribute) == primary_expected
+
+    monkeypatch.delenv(primary)
+    assert getattr(Config.from_env(), attribute) == legacy_expected
+
+
+def test_config_base_url_priority(monkeypatch):
+    monkeypatch.setenv("PIKACORE_BASE_URL", "https://pikacore.example")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://openai.example")
+    monkeypatch.setenv("CORECODER_BASE_URL", "https://corecoder.example")
+    assert Config.from_env().base_url == "https://pikacore.example"
+
+    monkeypatch.delenv("PIKACORE_BASE_URL")
+    assert Config.from_env().base_url == "https://openai.example"
+
+    monkeypatch.delenv("OPENAI_BASE_URL")
+    assert Config.from_env().base_url == "https://corecoder.example"
+
+
 def test_config_defaults(monkeypatch):
     # clear relevant env vars without leaking the change into other tests
+    monkeypatch.delenv("PIKACORE_MODEL", raising=False)
+    monkeypatch.delenv("PIKACORE_MAX_TOKENS", raising=False)
     monkeypatch.delenv("CORECODER_MODEL", raising=False)
     monkeypatch.delenv("CORECODER_MAX_TOKENS", raising=False)
 
@@ -34,6 +97,22 @@ def test_config_defaults(monkeypatch):
     assert c.model == "gpt-5.5"
     assert c.max_tokens == 4096
     assert c.temperature == 0.0
+
+
+def test_cli_help_uses_pikacore_names_and_marks_legacy_fallback(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["pikacore", "--help"])
+    with pytest.raises(SystemExit) as exc_info:
+        _parse_args()
+
+    assert exc_info.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "usage: pikacore" in help_text
+    assert "$PIKACORE_MODEL" in help_text
+    assert "$CORECODER_MODEL is a compatibility fallback" in help_text
+    assert "$PIKACORE_BASE_URL or $OPENAI_BASE_URL" in help_text
+    assert "$CORECODER_BASE_URL is a compatibility fallback" in help_text
+    assert "$PIKACORE_API_KEY or $OPENAI_API_KEY" in help_text
+    assert "$CORECODER_API_KEY is a compatibility fallback" in help_text
 
 
 # --- Context ---
@@ -132,7 +211,7 @@ def test_list_sessions():
 # --- Cost estimation ---
 
 def test_cost_estimation_known_model():
-    from corecoder.llm import LLM
+    from pikacore.llm import LLM
     llm = LLM.__new__(LLM)
     llm.model = "gpt-5.4"
     llm.total_prompt_tokens = 1_000_000
@@ -142,7 +221,7 @@ def test_cost_estimation_known_model():
     assert cost == 2.5 + 7.5  # $2.5/M in + $15/M out * 0.5M
 
 def test_cost_estimation_unknown_model():
-    from corecoder.llm import LLM
+    from pikacore.llm import LLM
     llm = LLM.__new__(LLM)
     llm.model = "some-custom-model"
     llm.total_prompt_tokens = 1000
@@ -153,7 +232,7 @@ def test_cost_estimation_unknown_model():
 # --- Changed files tracking ---
 
 def test_edit_tracks_changed_files(tmp_path):
-    from corecoder.tools.edit import _changed_files
+    from pikacore.tools.edit import _changed_files
     _changed_files.clear()
     edit = get_tool("edit_file")
     path = tmp_path / "sample.py"
@@ -164,7 +243,7 @@ def test_edit_tracks_changed_files(tmp_path):
 
 
 def test_write_tracks_changed_files(tmp_path):
-    from corecoder.tools.edit import _changed_files
+    from pikacore.tools.edit import _changed_files
     _changed_files.clear()
     write = get_tool("write_file")
     path = tmp_path / "tracked.txt"
@@ -191,7 +270,7 @@ def test_agent_tool_scope_is_per_instance():
 
 def test_exec_tool_distinguishes_bad_args_from_internal_error():
     """A TypeError raised inside a tool must not be reported as bad arguments."""
-    from corecoder.tools.base import Tool
+    from pikacore.tools.base import Tool
 
     class _Boom(Tool):
         name = "boom"

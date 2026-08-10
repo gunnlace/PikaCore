@@ -22,12 +22,28 @@ console = Console()
 
 def _parse_args():
     p = argparse.ArgumentParser(
-        prog="corecoder",
+        prog="pikacore",
         description="Minimal AI coding agent. Works with any OpenAI-compatible LLM.",
     )
-    p.add_argument("-m", "--model", help="Model name (default: $CORECODER_MODEL or gpt-5.5)")
-    p.add_argument("--base-url", help="API base URL (default: $OPENAI_BASE_URL)")
-    p.add_argument("--api-key", help="API key (default: $OPENAI_API_KEY)")
+    p.add_argument(
+        "-m",
+        "--model",
+        help="Model name (default: $PIKACORE_MODEL or gpt-5.5; $CORECODER_MODEL is a compatibility fallback)",
+    )
+    p.add_argument(
+        "--base-url",
+        help=(
+            "API base URL (default: $PIKACORE_BASE_URL or $OPENAI_BASE_URL; "
+            "$CORECODER_BASE_URL is a compatibility fallback)"
+        ),
+    )
+    p.add_argument(
+        "--api-key",
+        help=(
+            "API key (default: $PIKACORE_API_KEY or $OPENAI_API_KEY; "
+            "$CORECODER_API_KEY is a compatibility fallback)"
+        ),
+    )
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -49,7 +65,8 @@ def main():
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
         console.print(
-            "Set one of: OPENAI_API_KEY, DEEPSEEK_API_KEY, or CORECODER_API_KEY\n"
+            "Set one of: PIKACORE_API_KEY, OPENAI_API_KEY, or DEEPSEEK_API_KEY\n"
+            "Compatibility fallback: CORECODER_API_KEY\n"
             "\nExamples:\n"
             "  # OpenAI\n"
             "  export OPENAI_API_KEY=sk-...\n"
@@ -58,7 +75,7 @@ def main():
             "  export OPENAI_API_KEY=sk-... OPENAI_BASE_URL=https://api.deepseek.com\n"
             "\n"
             "  # Ollama (local)\n"
-            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 CORECODER_MODEL=qwen2.5-coder\n"
+            "  export OPENAI_API_KEY=ollama OPENAI_BASE_URL=http://localhost:11434/v1 PIKACORE_MODEL=qwen2.5-coder\n"
         )
         sys.exit(1)
 
@@ -117,14 +134,14 @@ def _run_once(agent: Agent, prompt: str):
 def _repl(agent: Agent, config: Config):
     """Interactive read-eval-print loop."""
     console.print(Panel(
-        f"[bold]CoreCoder[/bold] v{__version__}\n"
+        f"[bold]PikaCore[/bold] v{__version__}\n"
         f"Model: [cyan]{config.model}[/cyan]"
         + (f"  Base: [dim]{config.base_url}[/dim]" if config.base_url else "")
         + "\nType [bold]/help[/bold] for commands, [bold]Ctrl+C[/bold] to cancel, [bold]quit[/bold] to exit.",
         border_style="blue",
     ))
 
-    hist_path = os.path.expanduser("~/.corecoder_history")
+    hist_path = os.path.expanduser("~/.pikacore_history")
     history = FileHistory(hist_path)
 
     # Enter submits, Escape+Enter inserts a newline (for pasting code blocks etc.)
@@ -195,7 +212,7 @@ def _repl(agent: Agent, config: Config):
         if user_input == "/save":
             sid = save_session(agent.messages, config.model)
             console.print(f"[green]Session saved: {sid}[/green]")
-            console.print(f"Resume with: corecoder -r {sid}")
+            console.print(f"Resume with: pikacore -r {sid}")
             continue
         if user_input == "/diff":
             from .tools.edit import _changed_files
@@ -255,12 +272,12 @@ def _show_help():
         "  /diff          Show files modified this session\n"
         "  /save          Save session to disk\n"
         "  /sessions      List saved sessions\n"
-        "  quit           Exit CoreCoder\n"
+        "  quit           Exit PikaCore\n"
         "\n"
         "[bold]Input:[/bold]\n"
         "  Enter          Submit message\n"
         "  Esc+Enter      Insert newline (for pasting code)",
-        title="CoreCoder Help",
+        title="PikaCore Help",
         border_style="dim",
     ))
 

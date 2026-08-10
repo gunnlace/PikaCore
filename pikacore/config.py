@@ -5,6 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def _getenv(primary: str, legacy: str, default: str) -> str:
+    """Read a PikaCore variable, falling back to its legacy CoreCoder name."""
+    return os.getenv(primary) or os.getenv(legacy) or default
+
+
 def _load_dotenv():
     """Load .env from cwd, walking up to home dir. No-op if python-dotenv missing."""
     try:
@@ -41,17 +46,22 @@ class Config:
         _load_dotenv()
         # pick up common env vars automatically
         api_key = (
-            os.getenv("CORECODER_API_KEY")
+            os.getenv("PIKACORE_API_KEY")
             or os.getenv("OPENAI_API_KEY")
             or os.getenv("DEEPSEEK_API_KEY")
+            or os.getenv("CORECODER_API_KEY")
             or ""
         )
         return cls(
-            model=os.getenv("CORECODER_MODEL", "gpt-5.5"),
+            model=_getenv("PIKACORE_MODEL", "CORECODER_MODEL", "gpt-5.5"),
             api_key=api_key,
-            base_url=os.getenv("OPENAI_BASE_URL") or os.getenv("CORECODER_BASE_URL"),
-            max_tokens=int(os.getenv("CORECODER_MAX_TOKENS", "4096")),
-            temperature=float(os.getenv("CORECODER_TEMPERATURE", "0")),
-            max_context_tokens=int(os.getenv("CORECODER_MAX_CONTEXT", "128000")),
-            provider=os.getenv("CORECODER_PROVIDER", "openai"),
+            base_url=(
+                os.getenv("PIKACORE_BASE_URL")
+                or os.getenv("OPENAI_BASE_URL")
+                or os.getenv("CORECODER_BASE_URL")
+            ),
+            max_tokens=int(_getenv("PIKACORE_MAX_TOKENS", "CORECODER_MAX_TOKENS", "4096")),
+            temperature=float(_getenv("PIKACORE_TEMPERATURE", "CORECODER_TEMPERATURE", "0")),
+            max_context_tokens=int(_getenv("PIKACORE_MAX_CONTEXT", "CORECODER_MAX_CONTEXT", "128000")),
+            provider=_getenv("PIKACORE_PROVIDER", "CORECODER_PROVIDER", "openai"),
         )

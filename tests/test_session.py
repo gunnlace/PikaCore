@@ -1,5 +1,37 @@
-from corecoder import session as session_module
-from corecoder.session import load_session, save_session
+from pikacore import session as session_module
+from pikacore.session import load_session, save_session
+
+
+def test_default_session_directory_uses_pikacore_name():
+    assert session_module.SESSIONS_DIR == session_module._find_repo_root() / ".pikacore" / "sessions"
+
+
+def test_find_repo_root_walks_up_from_nested_directory(tmp_path):
+    repo = tmp_path / "repo"
+    nested = repo / "src" / "package"
+    nested.mkdir(parents=True)
+    (repo / ".git").write_text("gitdir: /tmp/example.git\n", encoding="utf-8")
+
+    assert session_module._find_repo_root(nested) == repo
+
+
+def test_session_directories_are_isolated_by_repository(tmp_path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    (repo_a / ".git").mkdir(parents=True)
+    (repo_b / ".git").mkdir(parents=True)
+
+    sessions_a = session_module._find_repo_root(repo_a) / ".pikacore" / "sessions"
+    sessions_b = session_module._find_repo_root(repo_b) / ".pikacore" / "sessions"
+
+    assert sessions_a != sessions_b
+
+
+def test_find_repo_root_falls_back_to_start_directory_outside_git(tmp_path):
+    start = tmp_path / "plain-directory"
+    start.mkdir()
+
+    assert session_module._find_repo_root(start) == start.resolve()
 
 
 def test_default_session_ids_do_not_collide(tmp_path, monkeypatch):
