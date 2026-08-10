@@ -1,5 +1,11 @@
-from corecoder import session as session_module
-from corecoder.session import load_session, save_session
+from pathlib import Path
+
+from pikacore import session as session_module
+from pikacore.session import load_session, save_session
+
+
+def test_default_session_directory_uses_pikacore_name():
+    assert session_module.SESSIONS_DIR == Path.home() / ".pikacore" / "sessions"
 
 
 def test_default_session_ids_do_not_collide(tmp_path, monkeypatch):
