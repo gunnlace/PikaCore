@@ -7,7 +7,6 @@ and makes edits safe and reviewable.
 """
 
 import difflib
-from pathlib import Path
 
 from .base import Tool
 
@@ -43,7 +42,7 @@ class EditFileTool(Tool):
 
     def execute(self, file_path: str, old_string: str, new_string: str) -> str:
         try:
-            p = Path(file_path).expanduser().resolve()
+            p = self.resolve_path(file_path, for_write=True)
             if not p.exists():
                 return f"Error: {file_path} not found"
 

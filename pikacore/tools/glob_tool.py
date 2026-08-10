@@ -27,11 +27,19 @@ class GlobTool(Tool):
 
     def execute(self, pattern: str, path: str = ".") -> str:
         try:
-            base = Path(path).expanduser().resolve()
+            pattern_path = Path(pattern)
+            if pattern_path.is_absolute() or ".." in pattern_path.parts:
+                return f"Error: glob pattern escapes workspace: {pattern}"
+            base = self.resolve_path(path)
             if not base.is_dir():
                 return f"Error: {path} is not a directory"
 
-            hits = list(base.glob(pattern))
+            hits = []
+            for hit in base.glob(pattern):
+                try:
+                    hits.append(self.resolve_path(str(hit)))
+                except ValueError:
+                    continue
             # sort by mtime, newest first
             hits.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
 

@@ -1,6 +1,5 @@
 """File reading with line numbers."""
 
-from pathlib import Path
 from .base import Tool
 
 
@@ -31,7 +30,7 @@ class ReadFileTool(Tool):
 
     def execute(self, file_path: str, offset: int = 1, limit: int = 2000) -> str:
         try:
-            p = Path(file_path).expanduser().resolve()
+            p = self.resolve_path(file_path)
             if not p.exists():
                 return f"Error: {file_path} not found"
             if not p.is_file():

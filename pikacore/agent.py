@@ -12,11 +12,12 @@ which means it's done working and ready to report back.
 import concurrent.futures
 import inspect
 from .llm import LLM
-from .tools import ALL_TOOLS
+from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
 from .context import ContextManager
+from .workspace import WorkspaceContext
 
 
 class Agent:
@@ -26,9 +27,13 @@ class Agent:
         tools: list[Tool] | None = None,
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
+        workspace: WorkspaceContext | None = None,
     ):
         self.llm = llm
-        self.tools = tools if tools is not None else ALL_TOOLS
+        self.workspace = workspace or WorkspaceContext.discover()
+        self.tools = tools if tools is not None else create_tools(self.workspace)
+        for tool in self.tools:
+            tool.bind_workspace(self.workspace)
         self._tool_by_name = {t.name: t for t in self.tools}
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
