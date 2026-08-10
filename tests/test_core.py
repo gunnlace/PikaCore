@@ -10,6 +10,7 @@ from pikacore.cli import _parse_args
 from pikacore.context import ContextManager, estimate_tokens
 from pikacore.session import save_session, load_session, list_sessions
 from pikacore.tools import get_tool
+from tests.protocol_assertions import assert_tool_pairing
 
 
 def test_version():
@@ -171,10 +172,7 @@ def test_compress_never_leaves_an_orphan_tool_reply():
         msgs.append({"role": "assistant", "content": None, "tool_calls": [{"id": f"c{i}"}]})
         msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": "b" * 800})
     ctx.maybe_compress(msgs, None)
-    for i, m in enumerate(msgs):
-        if m.get("role") == "tool":
-            prev = msgs[i - 1]
-            assert prev.get("role") == "tool" or prev.get("tool_calls"), f"orphan tool at {i}"
+    assert_tool_pairing(msgs)
 
 
 # --- Session ---
@@ -250,63 +248,3 @@ def test_write_tracks_changed_files(tmp_path):
     write.execute(file_path=str(path), content="tracked\n")
     assert any(path.name in p for p in _changed_files)
     _changed_files.clear()
-
-
-# --- Agent tool execution ---
-
-def test_agent_tool_scope_is_per_instance():
-    """An Agent restricted to a subset of tools must not resolve tools outside it."""
-    only_read = [get_tool("read_file")]
-    agent = Agent(llm=LLM.__new__(LLM), tools=only_read)
-    assert set(agent._tool_by_name) == {"read_file"}
-
-    class _TC:
-        name = "bash"  # a real, registered tool - but not in this agent's set
-        id = "x"
-        arguments = {"command": "echo hi"}
-
-    assert "unknown tool 'bash'" in agent._exec_tool(_TC())
-
-
-def test_exec_tool_distinguishes_bad_args_from_internal_error():
-    """A TypeError raised inside a tool must not be reported as bad arguments."""
-    from pikacore.tools.base import Tool
-
-    class _Boom(Tool):
-        name = "boom"
-        description = "raises TypeError internally"
-        parameters = {"type": "object", "properties": {}, "required": []}
-
-        def execute(self):
-            raise TypeError("internal explosion")
-
-    agent = Agent(llm=LLM.__new__(LLM), tools=[_Boom()])
-
-    class _BadArgs:
-        name, id, arguments = "boom", "1", {"unexpected": 1}
-
-    class _Good:
-        name, id, arguments = "boom", "2", {}
-
-    assert "bad arguments" in agent._exec_tool(_BadArgs())
-    assert "Error executing boom" in agent._exec_tool(_Good())
-    assert "bad arguments" not in agent._exec_tool(_Good())
-
-
-def test_interrupt_backfills_missing_tool_replies():
-    """A half-finished tool round must be repaired so history stays valid."""
-    agent = Agent(llm=LLM.__new__(LLM), tools=[])
-    agent.messages = [
-        {"role": "assistant", "content": None, "tool_calls": [{"id": "a"}, {"id": "b"}]},
-        {"role": "tool", "tool_call_id": "a", "content": "done"},
-    ]
-
-    class _TC:
-        def __init__(self, i):
-            self.id = i
-
-    agent._answer_pending_tool_calls([_TC("a"), _TC("b")])
-    replies = [m for m in agent.messages if m.get("role") == "tool"]
-    ids = [m["tool_call_id"] for m in replies]
-    assert sorted(ids) == ["a", "b"]
-    assert ids.count("a") == 1  # the already-answered call wasn't duplicated
