@@ -12,6 +12,7 @@ import re
 import subprocess
 import threading
 from .base import Tool
+from ..security import sanitize_environment
 
 # patterns that could wreck the filesystem or leak secrets
 _DANGEROUS_PATTERNS = [
@@ -33,6 +34,8 @@ _DANGEROUS_PATTERNS = [
 
 class BashTool(Tool):
     name = "bash"
+    risk_level = "high"
+    read_only = False
     description = (
         "Execute a shell command. Returns stdout, stderr, and exit code. "
         "Use this for running tests, installing packages, git operations, etc."
@@ -77,6 +80,7 @@ class BashTool(Tool):
                 errors="replace",
                 timeout=timeout,
                 cwd=cwd,
+                env=sanitize_environment(os.environ),
             )
 
             # track cd commands so next command runs in the right place
