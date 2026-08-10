@@ -18,6 +18,7 @@ class EditFileTool(Tool):
     name = "edit_file"
     risk_level = "medium"
     read_only = False
+    path_parameters = {"file_path": True}
     description = (
         "Edit a file by replacing an exact string match. "
         "old_string must appear exactly once in the file for safety. "

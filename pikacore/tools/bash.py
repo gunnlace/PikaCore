@@ -11,7 +11,7 @@ import os
 import re
 import subprocess
 import threading
-from .base import Tool
+from .base import Tool, ToolOutput
 from ..security import sanitize_environment
 
 # patterns that could wreck the filesystem or leak secrets
@@ -62,10 +62,20 @@ class BashTool(Tool):
         self._local = threading.local()
 
     def execute(self, command: str, timeout: int = 120) -> str:
+        return self.execute_structured(command=command, timeout=timeout).content
+
+    def execute_structured(self, command: str, timeout: int = 120) -> ToolOutput:
         # safety check
         warning = _check_dangerous(command)
         if warning:
-            return f"⚠ Blocked: {warning}\nCommand: {command}\nIf intentional, modify the command to be more specific."
+            return ToolOutput(
+                content=(
+                    f"⚠ Blocked: {warning}\nCommand: {command}\n"
+                    "If intentional, modify the command to be more specific."
+                ),
+                status="error",
+                error_code="command-blocked",
+            )
 
         # use this thread's own tracked working directory
         cwd = getattr(self._local, "cwd", None) or str(self.workspace_context.repo_root)
@@ -94,17 +104,32 @@ class BashTool(Tool):
             if proc.returncode != 0:
                 out += f"\n[exit code: {proc.returncode}]"
             # keep head + tail to preserve the most useful info
-            if len(out) > 15_000:
+            output_truncated = len(out) > 15_000
+            if output_truncated:
                 out = (
                     out[:6000]
                     + f"\n\n... truncated ({len(out)} chars total) ...\n\n"
                     + out[-3000:]
                 )
-            return out.strip() or "(no output)"
+            return ToolOutput(
+                content=out.strip() or "(no output)",
+                status="ok" if proc.returncode == 0 else "error",
+                error_code=None if proc.returncode == 0 else "nonzero-exit",
+                exit_code=proc.returncode,
+                output_truncated=output_truncated,
+            )
         except subprocess.TimeoutExpired:
-            return f"Error: timed out after {timeout}s"
+            return ToolOutput(
+                content=f"Error: timed out after {timeout}s",
+                status="error",
+                error_code="timeout",
+            )
         except Exception as e:
-            return f"Error running command: {e}"
+            return ToolOutput(
+                content=f"Error running command: {e}",
+                status="error",
+                error_code="process-error",
+            )
 
 
 def _check_dangerous(cmd: str) -> str | None:

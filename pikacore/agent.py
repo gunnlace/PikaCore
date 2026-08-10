@@ -9,14 +9,14 @@ It keeps looping until the LLM responds with plain text (no tool calls),
 which means it's done working and ready to report back.
 """
 
-import concurrent.futures
-import inspect
 from .llm import LLM
 from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
 from .context import ContextManager
+from .permissions import PermissionPolicy
+from .tool_executor import ApprovalCallback, ToolExecutor
 from .workspace import WorkspaceContext
 
 
@@ -28,6 +28,8 @@ class Agent:
         max_context_tokens: int = 128_000,
         max_rounds: int = 50,
         workspace: WorkspaceContext | None = None,
+        permission_policy: PermissionPolicy | None = None,
+        approval_callback: ApprovalCallback | None = None,
     ):
         self.llm = llm
         self.workspace = workspace or WorkspaceContext.discover()
@@ -35,6 +37,13 @@ class Agent:
         for tool in self.tools:
             tool.bind_workspace(self.workspace)
         self._tool_by_name = {t.name: t for t in self.tools}
+        self.permission_policy = permission_policy or PermissionPolicy()
+        self.approval_callback = approval_callback
+        self.tool_executor = ToolExecutor(
+            self.tools,
+            permission_policy=self.permission_policy,
+            approval_callback=self.approval_callback,
+        )
         self.messages: list[dict] = []
         self.context = ContextManager(max_tokens=max_context_tokens)
         self.max_rounds = max_rounds
@@ -73,25 +82,13 @@ class Agent:
             self.messages.append(resp.message)
 
             try:
-                if len(resp.tool_calls) == 1:
-                    tc = resp.tool_calls[0]
-                    if on_tool:
-                        on_tool(tc.name, tc.arguments)
-                    result = self._exec_tool(tc)
+                results = self.tool_executor.execute_many(resp.tool_calls, on_tool=on_tool)
+                for tc, result in zip(resp.tool_calls, results):
                     self.messages.append({
                         "role": "tool",
                         "tool_call_id": tc.id,
-                        "content": result,
+                        "content": result.content,
                     })
-                else:
-                    # parallel execution for multiple tool calls
-                    results = self._exec_tools_parallel(resp.tool_calls, on_tool)
-                    for tc, result in zip(resp.tool_calls, results):
-                        self.messages.append({
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": result,
-                        })
             except KeyboardInterrupt:
                 # Ctrl+C mid-execution would leave the assistant tool_calls
                 # message without replies, poisoning the next request; backfill
@@ -104,35 +101,15 @@ class Agent:
         return "(reached maximum tool-call rounds)"
 
     def _exec_tool(self, tc) -> str:
-        """Execute a single tool call, returning the result string."""
-        tool = self._tool_by_name.get(tc.name)
-        if tool is None:
-            return f"Error: unknown tool '{tc.name}'"
-        # validate arguments first so a TypeError raised *inside* the tool isn't
-        # mislabelled as a bad-arguments error from the caller
-        try:
-            inspect.signature(tool.execute).bind(**tc.arguments)
-        except TypeError as e:
-            return f"Error: bad arguments for {tc.name}: {e}"
-        try:
-            return tool.execute(**tc.arguments)
-        except Exception as e:
-            return f"Error executing {tc.name}: {e}"
+        """Compatibility facade returning only model-visible result content."""
+        return self.tool_executor.execute_one(tc).content
 
     def _exec_tools_parallel(self, tool_calls, on_tool=None) -> list[str]:
-        """Run multiple tool calls concurrently using threads.
-
-        This is inspired by Claude Code's StreamingToolExecutor which starts
-        executing tools while the model is still generating.  We simplify to:
-        when the model returns N tool calls at once, run them in parallel.
-        """
-        for tc in tool_calls:
-            if on_tool:
-                on_tool(tc.name, tc.arguments)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-            futures = [pool.submit(self._exec_tool, tc) for tc in tool_calls]
-            return [f.result() for f in futures]
+        """Compatibility facade preserving the historical list[str] result."""
+        return [
+            result.content
+            for result in self.tool_executor.execute_many(tool_calls, on_tool=on_tool)
+        ]
 
     def _answer_pending_tool_calls(self, tool_calls):
         """Backfill a tool reply for every call that didn't get one.

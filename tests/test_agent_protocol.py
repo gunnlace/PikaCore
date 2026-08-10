@@ -8,6 +8,7 @@ import pytest
 
 from pikacore.agent import Agent
 from pikacore.llm import LLMResponse, ToolCall
+from pikacore.permissions import PermissionPolicy
 from pikacore.tools.agent import AgentTool
 from pikacore.tools.base import Tool
 from tests.protocol_assertions import assert_tool_pairing
@@ -269,7 +270,11 @@ def test_sub_agent_cannot_access_agent_tool_recursively():
         _final("child finished"),
         _final("parent finished"),
     ])
-    agent = Agent(llm=llm, tools=[AgentTool()])
+    agent = Agent(
+        llm=llm,
+        tools=[AgentTool()],
+        permission_policy=PermissionPolicy("auto"),
+    )
 
     assert agent.chat("use a sub-agent") == "parent finished"
     assert llm.calls[1]["tools"] == []
