@@ -13,6 +13,8 @@ from .base import Tool
 
 class AgentTool(Tool):
     name = "agent"
+    risk_level = "high"
+    read_only = False
     description = (
         "Spawn a sub-agent to handle a complex sub-task independently. "
         "The sub-agent has its own context and tool access. Use this for: "

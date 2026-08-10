@@ -6,6 +6,8 @@ from .edit import _changed_files
 
 class WriteFileTool(Tool):
     name = "write_file"
+    risk_level = "medium"
+    read_only = False
     description = (
         "Create a new file or completely overwrite an existing one. "
         "For small edits to existing files, prefer edit_file instead."

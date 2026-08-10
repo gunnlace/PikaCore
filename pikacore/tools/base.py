@@ -1,6 +1,7 @@
 """Base class for all tools."""
 
 from abc import ABC, abstractmethod
+from typing import Literal
 
 from ..workspace import WorkspaceContext
 
@@ -11,6 +12,8 @@ class Tool(ABC):
     name: str
     description: str
     parameters: dict  # JSON Schema for the function args
+    risk_level: Literal["low", "medium", "high"] = "low"
+    read_only: bool = True
 
     def __init__(self, workspace: WorkspaceContext | None = None):
         self.workspace = workspace
