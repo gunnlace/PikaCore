@@ -8,6 +8,7 @@ class WriteFileTool(Tool):
     name = "write_file"
     risk_level = "medium"
     read_only = False
+    path_parameters = {"file_path": True}
     description = (
         "Create a new file or completely overwrite an existing one. "
         "For small edits to existing files, prefer edit_file instead."

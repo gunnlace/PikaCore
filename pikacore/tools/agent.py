@@ -49,6 +49,8 @@ class AgentTool(Tool):
             max_context_tokens=parent.context.max_tokens,
             max_rounds=20,
             workspace=parent.workspace,
+            permission_policy=parent.permission_policy,
+            approval_callback=parent.approval_callback,
         )
 
         try:

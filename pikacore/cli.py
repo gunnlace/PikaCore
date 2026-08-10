@@ -15,6 +15,7 @@ from .agent import Agent
 from .llm import LLM, LiteLLM
 from .config import Config
 from .session import save_session, load_session, list_sessions
+from .permissions import PermissionPolicy
 from . import __version__
 
 console = Console()
@@ -46,6 +47,12 @@ def _parse_args():
     )
     p.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     p.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
+    p.add_argument(
+        "--permissions",
+        choices=("read-only", "ask", "auto"),
+        default="ask",
+        help="Tool permission mode (default: ask)",
+    )
     p.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     return p.parse_args()
 
@@ -87,7 +94,12 @@ def main():
         temperature=config.temperature,
         max_tokens=config.max_tokens,
     )
-    agent = Agent(llm=llm, max_context_tokens=config.max_context_tokens)
+    agent = Agent(
+        llm=llm,
+        max_context_tokens=config.max_context_tokens,
+        permission_policy=PermissionPolicy(args.permissions),
+        approval_callback=_approve_tool,
+    )
 
     # resume saved session
     if args.resume:
@@ -129,6 +141,18 @@ def _run_once(agent: Agent, prompt: str):
         console.print(f"\n[red]Error: {e}[/red]")
         sys.exit(1)
     print()
+
+
+def _approve_tool(tool, arguments: dict) -> bool:
+    """Ask for side-effect approval; ToolExecutor invokes this on the main thread."""
+    console.print(
+        f"[yellow]Approve {tool.name} ({tool.risk_level} risk)?[/yellow] "
+        f"[dim]{_brief(arguments)}[/dim]"
+    )
+    try:
+        return input("Approve? [y/N] ").strip().lower() in {"y", "yes"}
+    except (EOFError, KeyboardInterrupt):
+        return False
 
 
 def _repl(agent: Agent, config: Config):

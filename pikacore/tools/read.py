@@ -5,6 +5,7 @@ from .base import Tool
 
 class ReadFileTool(Tool):
     name = "read_file"
+    path_parameters = {"file_path": False}
     description = (
         "Read a file's contents with line numbers. "
         "Always read a file before editing it."

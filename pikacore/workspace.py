@@ -1,5 +1,7 @@
 """Repository discovery and canonical path boundaries."""
 
+import hashlib
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -7,6 +9,13 @@ from pathlib import Path
 
 class WorkspaceBoundaryError(ValueError):
     """Raised when a requested path escapes the active workspace."""
+
+
+@dataclass(frozen=True)
+class WorkspaceSnapshot:
+    """A lightweight fingerprint of the repository's observable changes."""
+
+    path_fingerprints: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -52,6 +61,37 @@ class WorkspaceContext:
             raise WorkspaceBoundaryError("Workspace root cannot be used as a file")
         return resolved
 
+    def snapshot(self) -> WorkspaceSnapshot | None:
+        """Capture tracked, staged, and untracked workspace state without mutation."""
+        status = _run_git(
+            self.repo_root,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+        )
+        if status is None:
+            return None
+
+        entries = _porcelain_entries(status)
+        fingerprints = []
+        for relative_path, state in sorted(entries.items()):
+            digest = hashlib.sha256(state.encode("ascii"))
+            _update_path_digest(digest, self.repo_root / relative_path)
+            staged_diff = _run_git(
+                self.repo_root,
+                "diff",
+                "--cached",
+                "--binary",
+                "--no-ext-diff",
+                "--",
+                relative_path,
+            )
+            if staged_diff:
+                digest.update(staged_diff.encode("utf-8", errors="surrogateescape"))
+            fingerprints.append((relative_path, digest.hexdigest()))
+        return WorkspaceSnapshot(tuple(fingerprints))
+
     @staticmethod
     def _resolve_write_target(candidate: Path) -> Path:
         """Resolve existing symlink parents while allowing a missing final path."""
@@ -83,4 +123,43 @@ def _run_git(cwd: Path, *args: str) -> str | None:
         return None
     if result.returncode != 0:
         return None
-    return result.stdout.strip()
+    return result.stdout.rstrip("\r\n")
+
+
+def _porcelain_entries(status: str) -> dict[str, str]:
+    """Extract path state for both sides of porcelain v1 -z records."""
+    records = status.split("\0")
+    entries: dict[str, str] = {}
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        code = record[:2]
+        entries[record[3:]] = code
+        if "R" in code or "C" in code:
+            if index < len(records) and records[index]:
+                entries[records[index]] = f"{code}:source"
+            index += 1
+    return entries
+
+
+def _update_path_digest(digest, path: Path) -> None:
+    """Hash changed file content while never following a symlink."""
+    try:
+        if path.is_symlink():
+            digest.update(b"symlink\0")
+            digest.update(os.readlink(path).encode("utf-8", errors="surrogateescape"))
+            return
+        if not path.exists():
+            digest.update(b"missing\0")
+            return
+        if not path.is_file():
+            digest.update(b"non-file\0")
+            return
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError as exc:
+        digest.update(f"unreadable:{type(exc).__name__}".encode())
