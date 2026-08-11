@@ -300,6 +300,7 @@ class Report(PersistedState):
     context_compressions: int = 0
     context_tokens_before: int = 0
     context_tokens_after: int = 0
+    context_compression_events: list[dict] = field(default_factory=list)
     checkpoint_status: str | None = None
     recovery_status: str | None = None
     stop_reason: StopReason | None = None
@@ -329,6 +330,7 @@ class Report(PersistedState):
         "context_compressions",
         "context_tokens_before",
         "context_tokens_after",
+        "context_compression_events",
         "checkpoint_status",
         "recovery_status",
         "stop_reason",
