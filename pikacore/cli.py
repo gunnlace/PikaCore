@@ -239,14 +239,22 @@ def _repl(agent: Agent, config: Config):
                 console.print(f"Current model: [cyan]{config.model}[/cyan]")
             continue
         if user_input == "/compact":
-            from .context import estimate_tokens
-            before = estimate_tokens(agent.messages)
-            compressed = agent.context.maybe_compress(agent.messages, agent.llm)
-            after = estimate_tokens(agent.messages)
-            if compressed:
-                console.print(f"[green]Compressed: {before} → {after} tokens ({len(agent.messages)} messages)[/green]")
+            result = agent.context.maybe_compress(
+                agent.messages,
+                agent.llm,
+                agent.session_state.working_memory,
+            )
+            if result.changed:
+                console.print(
+                    f"[green]Compressed ({result.strategy}): "
+                    f"{result.before_tokens} → {result.after_tokens} tokens "
+                    f"({len(agent.messages)} messages)[/green]"
+                )
             else:
-                console.print(f"[dim]Nothing to compress ({before} tokens, {len(agent.messages)} messages)[/dim]")
+                console.print(
+                    f"[dim]Nothing to compress ({result.before_tokens} tokens, "
+                    f"{len(agent.messages)} messages)[/dim]"
+                )
             continue
         if user_input == "/save":
             sid = save_session(agent.messages, config.model)

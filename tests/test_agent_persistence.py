@@ -236,14 +236,53 @@ def test_context_compression_rewrite_is_saved_and_traced(tmp_path):
         if message.get("role") == "tool"
     ]
     assert any("line 50" in content for content in tool_contents)
-    assert any("snipped to save context" in content for content in tool_contents)
+    assert any("[Tool output compressed]" in content for content in tool_contents)
     run_id = agent.session_state.run_ids[-1]
     report = store.load_report(run_id)
     assert report is not None
     assert report.context_compressions == 1
-    assert "context_compressed" in [
-        event.event for event in store.read_trace(run_id).events
+    assert len(report.context_compression_events) == 1
+    compression = report.context_compression_events[0]
+    assert compression["strategy"] == "tool-output-snip"
+    assert compression["after_tokens"] < compression["before_tokens"]
+    trace_compressions = [
+        event.data
+        for event in store.read_trace(run_id).events
+        if event.event == "context_compressed"
     ]
+    assert trace_compressions == report.context_compression_events
+
+
+def test_every_context_compression_is_recorded_in_trace_and_report(tmp_path):
+    store = ProjectStore(state_root=tmp_path / "state")
+    agent = Agent(
+        llm=FakeLLM([
+            _tool_response(ToolCall("long-1", "long_output", {})),
+            _tool_response(ToolCall("long-2", "long_output", {})),
+            _final_response("compressed history summary"),
+            _final_response(),
+        ]),
+        tools=[LongOutputTool()],
+        max_context_tokens=100,
+        workspace=WorkspaceContext(tmp_path),
+        store=store,
+    )
+
+    agent.chat("compress twice")
+    run_id = agent.session_state.run_ids[-1]
+    report = store.load_report(run_id)
+    trace_events = [
+        event.data
+        for event in store.read_trace(run_id).events
+        if event.event == "context_compressed"
+    ]
+
+    assert report is not None
+    assert report.context_compressions == 2
+    assert len(report.context_compression_events) == 2
+    assert trace_events == report.context_compression_events
+    assert all(event["strategy"] for event in trace_events)
+    assert all(event["after_tokens"] < event["before_tokens"] for event in trace_events)
 
 
 def test_model_failure_persists_failed_run_report_and_user_message(tmp_path):
