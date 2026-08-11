@@ -17,6 +17,7 @@ StopReason = Literal[
     "model_error",
     "internal_error",
 ]
+FileAction = Literal["read", "modified"]
 
 
 class SchemaMismatchError(ValueError):
@@ -58,6 +59,79 @@ class PersistedState:
 
 
 @dataclass
+class FileMemory:
+    path: str
+    action: FileAction
+    summary: str
+    content_hash: str | None = None
+    fresh: bool = True
+    updated_at: str = field(default_factory=utc_now)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> FileMemory:
+        if not isinstance(data, dict):
+            raise ValueError("FileMemory must be a JSON object")
+        return cls(
+            path=str(data["path"]),
+            action=data["action"],
+            summary=str(data.get("summary", "")),
+            content_hash=data.get("content_hash"),
+            fresh=bool(data.get("fresh", True)),
+            updated_at=str(data.get("updated_at", utc_now())),
+        )
+
+
+@dataclass
+class CommandMemory:
+    command: str
+    exit_code: int | None
+    status: str
+    run_id: str
+    executed_at: str = field(default_factory=utc_now)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> CommandMemory:
+        if not isinstance(data, dict):
+            raise ValueError("CommandMemory must be a JSON object")
+        return cls(
+            command=str(data.get("command", "")),
+            exit_code=data.get("exit_code"),
+            status=str(data.get("status", "unknown")),
+            run_id=str(data.get("run_id", "")),
+            executed_at=str(data.get("executed_at", utc_now())),
+        )
+
+
+@dataclass
+class WorkingMemory:
+    current_request: str = ""
+    task_summary: str = ""
+    files: list[FileMemory] = field(default_factory=list)
+    recent_commands: list[CommandMemory] = field(default_factory=list)
+    blockers: list[str] = field(default_factory=list)
+    next_steps: list[str] = field(default_factory=list)
+    updated_at: str = field(default_factory=utc_now)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | WorkingMemory) -> WorkingMemory:
+        if isinstance(data, cls):
+            return data
+        if not isinstance(data, dict):
+            raise ValueError("WorkingMemory must be a JSON object")
+        return cls(
+            current_request=str(data.get("current_request", "")),
+            task_summary=str(data.get("task_summary", "")),
+            files=[FileMemory.from_dict(item) for item in data.get("files", [])],
+            recent_commands=[
+                CommandMemory.from_dict(item) for item in data.get("recent_commands", [])
+            ],
+            blockers=[str(item) for item in data.get("blockers", [])],
+            next_steps=[str(item) for item in data.get("next_steps", [])],
+            updated_at=str(data.get("updated_at", utc_now())),
+        )
+
+
+@dataclass
 class SessionState(PersistedState):
     schema_version: int = SCHEMA_VERSION
     session_id: str = field(default_factory=lambda: new_id("session"))
@@ -66,8 +140,7 @@ class SessionState(PersistedState):
     repo_root: str = ""
     model: str = "unknown"
     messages: list[dict] = field(default_factory=list)
-    # Phase 5 owns WorkingMemory behavior. Phase 3 only reserves its schema slot.
-    working_memory: dict = field(default_factory=dict)
+    working_memory: WorkingMemory = field(default_factory=WorkingMemory)
     last_checkpoint_id: str | None = None
     run_ids: list[str] = field(default_factory=list)
 
@@ -86,6 +159,15 @@ class SessionState(PersistedState):
 
     def touch(self) -> None:
         self.updated_at = utc_now()
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SessionState:
+        _validate_schema(data)
+        values = {name: data[name] for name in cls._fields if name in data}
+        values["working_memory"] = WorkingMemory.from_dict(
+            values.get("working_memory", {})
+        )
+        return cls(**values)
 
 
 @dataclass

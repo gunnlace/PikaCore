@@ -31,10 +31,28 @@ from .tools.agent import AgentTool
 from .prompt import system_prompt
 from .context import ContextManager, estimate_tokens
 from .permissions import PermissionPolicy
-from .state import Checkpoint, Report, RunState, SchemaMismatchError, SessionState, TraceEvent, utc_now
+from .state import (
+    Checkpoint,
+    Report,
+    RunState,
+    SchemaMismatchError,
+    SessionState,
+    TraceEvent,
+    WorkingMemory,
+    utc_now,
+)
 from .store import ProjectStore
 from .tool_executor import ApprovalCallback, ToolExecutionResult, ToolExecutor
 from .workspace import WorkspaceContext
+from .working_memory import (
+    CheckpointMemoryEvent,
+    RecoveryMemoryEvent,
+    RunMemoryEvent,
+    ToolMemoryEvent,
+    UserMemoryEvent,
+    WorkingMemoryManager,
+    render_working_memory,
+)
 
 
 @dataclass
@@ -92,6 +110,13 @@ class Agent:
             repo_root=str(self.workspace.repo_root),
             model=model,
         )
+        self.session_state.working_memory = WorkingMemory.from_dict(
+            self.session_state.working_memory
+        )
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
         self.store = store if store is not None else (
             ProjectStore(repo_root=self.workspace.repo_root) if persist else None
         )
@@ -115,7 +140,11 @@ class Agent:
                 t._parent_agent = self
 
     def _full_messages(self) -> list[dict]:
-        return [{"role": "system", "content": self._system}] + self.messages
+        full = [{"role": "system", "content": self._system}]
+        rendered_memory = render_working_memory(self.session_state.working_memory)
+        if rendered_memory:
+            full.append({"role": "system", "content": rendered_memory})
+        return full + self.messages
 
     def _tool_schemas(self) -> list[dict]:
         return [t.schema() for t in self.tools]
@@ -316,6 +345,11 @@ class Agent:
         )
         self.session_state.run_ids.append(run.run_id)
         self.session_state.touch()
+        memory_changed = self.working_memory.apply(UserMemoryEvent(
+            request=user_input,
+            run_id=run.run_id,
+            occurred_at=utc_now(),
+        ))
         self._save_run()
         self._save_session()
         self._trace(
@@ -326,6 +360,8 @@ class Agent:
                 "parent_run_id": self.parent_run_id,
             },
         )
+        if memory_changed:
+            self._trace_working_memory("user")
         return run
 
     def _append_message(self, message: dict) -> None:
@@ -406,6 +442,14 @@ class Agent:
         if result.status == "rejected":
             self._trace("tool_rejected", event_data)
         self._trace("tool_completed", event_data)
+        if self.working_memory.apply(ToolMemoryEvent(
+            tool_name=tool_call.name,
+            arguments=dict(tool_call.arguments),
+            result=result,
+            run_id=run.run_id,
+            occurred_at=utc_now(),
+        )):
+            self._trace_working_memory("tool")
 
     def _finish_run(
         self,
@@ -428,6 +472,13 @@ class Agent:
         if status == "completed":
             self._last_successful_action = "run_completed"
         self._create_checkpoint(last_successful_action=self._last_successful_action)
+        if self.working_memory.apply(RunMemoryEvent(
+            status=status,
+            stop_reason=stop_reason,
+            run_id=run.run_id,
+            occurred_at=run.finished_at,
+        )):
+            self._trace_working_memory("run")
         self._trace(
             "run_finished" if status == "completed" else "run_failed",
             {"status": status, "stop_reason": stop_reason, "error": error},
@@ -493,7 +544,12 @@ class Agent:
             workspace=self.workspace,
         )
         self.recovery_result = result
-        if apply_recovery(self.session_state, result):
+        session_changed = apply_recovery(self.session_state, result)
+        memory_changed = self.working_memory.apply(RecoveryMemoryEvent(
+            result=result,
+            occurred_at=utc_now(),
+        ))
+        if session_changed or memory_changed:
             self._save_session()
         return result
 
@@ -574,6 +630,15 @@ class Agent:
             return None
         if last_successful_action is not None:
             self._last_successful_action = last_successful_action
+        resolved_next_action = (
+            next_suggested_action
+            if next_suggested_action is not None
+            else (
+                "inspect workspace before deciding whether to retry pending tools"
+                if self._pending_tool_calls
+                else None
+            )
+        )
         checkpoint = Checkpoint(
             parent_checkpoint_id=self.session_state.last_checkpoint_id,
             session_id=self.session_state.session_id,
@@ -582,15 +647,7 @@ class Agent:
             completed_tool_call_ids=list(self._completed_tool_call_ids),
             pending_tool_calls=list(self._pending_tool_calls),
             last_successful_action=self._last_successful_action,
-            next_suggested_action=(
-                next_suggested_action
-                if next_suggested_action is not None
-                else (
-                    "inspect workspace before deciding whether to retry pending tools"
-                    if self._pending_tool_calls
-                    else None
-                )
-            ),
+            next_suggested_action=resolved_next_action,
             file_freshness=dict(sorted(self._file_freshness.items())),
             runtime_identity=self._runtime_identity(),
         )
@@ -602,6 +659,16 @@ class Agent:
         self.session_state.last_checkpoint_id = checkpoint.checkpoint_id
         if self._checkpoint_status != "error":
             self._checkpoint_status = "created"
+        if self.working_memory.apply(CheckpointMemoryEvent(
+            file_freshness=checkpoint.file_freshness,
+            pending_tool_names=[
+                str(call.get("name", "unknown"))
+                for call in checkpoint.pending_tool_calls
+            ],
+            next_suggested_action=checkpoint.next_suggested_action,
+            occurred_at=checkpoint.created_at,
+        )):
+            self._trace_working_memory("checkpoint")
         self._save_session()
         self._trace(
             "checkpoint_created",
@@ -636,6 +703,19 @@ class Agent:
             data=data,
         )
         self._safe_store("append trace", self.store.append_trace, trace_event)
+
+    def _trace_working_memory(self, source: str) -> None:
+        memory = self.session_state.working_memory
+        self._trace(
+            "working_memory_updated",
+            {
+                "source": source,
+                "file_count": len(memory.files),
+                "command_count": len(memory.recent_commands),
+                "blocker_count": len(memory.blockers),
+                "next_step_count": len(memory.next_steps),
+            },
+        )
 
     def _safe_store(self, action: str, operation, *args) -> bool:
         try:
