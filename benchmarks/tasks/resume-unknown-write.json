@@ -1,0 +1,11 @@
+{
+  "id": "resume-unknown-write",
+  "request": "Recover an interrupted write without replaying it.",
+  "repo_files": ["target.txt"],
+  "permission_mode": "auto",
+  "responses": [],
+  "expected": {
+    "files_equal": {"target.txt": "original\n"},
+    "recovery_status": "incomplete-tool-call"
+  }
+}

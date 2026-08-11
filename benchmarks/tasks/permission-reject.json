@@ -1,0 +1,34 @@
+{
+  "id": "permission-reject",
+  "request": "Change protected.txt only if approval is granted.",
+  "repo_files": ["protected.txt"],
+  "permission_mode": "ask",
+  "approvals": [false],
+  "responses": [
+    {
+      "tool_calls": [
+        {
+          "id": "rejected-edit",
+          "name": "edit_file",
+          "arguments": {"file_path": "protected.txt", "old_string": "original", "new_string": "changed"}
+        }
+      ],
+      "prompt_tokens": 9,
+      "completion_tokens": 3
+    },
+    {"content": "permission rejection handled", "prompt_tokens": 7, "completion_tokens": 3}
+  ],
+  "expected": {
+    "final_answer": "permission rejection handled",
+    "files_equal": {"protected.txt": "original\n"},
+    "approval_count": 1,
+    "tool_events": [
+      {
+        "tool_name": "edit_file",
+        "status": "rejected",
+        "error_code": "approval-rejected",
+        "approval": "rejected"
+      }
+    ]
+  }
+}

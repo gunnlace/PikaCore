@@ -1,0 +1,36 @@
+{
+  "id": "working-memory-stale",
+  "request": "Read module.py and then edit the same file.",
+  "repo_files": ["module.py"],
+  "permission_mode": "auto",
+  "responses": [
+    {
+      "tool_calls": [
+        {"id": "memory-read", "name": "read_file", "arguments": {"file_path": "module.py"}}
+      ],
+      "prompt_tokens": 8,
+      "completion_tokens": 2
+    },
+    {
+      "tool_calls": [
+        {
+          "id": "memory-edit",
+          "name": "edit_file",
+          "arguments": {"file_path": "module.py", "old_string": "VALUE = 1", "new_string": "VALUE = 2"}
+        }
+      ],
+      "prompt_tokens": 9,
+      "completion_tokens": 3
+    },
+    {"content": "working memory stale state recorded", "prompt_tokens": 7, "completion_tokens": 3}
+  ],
+  "expected": {
+    "final_answer": "working memory stale state recorded",
+    "files_contain": {"module.py": "VALUE = 2"},
+    "working_memory_file": {"path": "module.py", "action": "modified", "fresh": false},
+    "tool_events": [
+      {"tool_name": "read_file", "status": "ok"},
+      {"tool_name": "edit_file", "status": "ok"}
+    ]
+  }
+}

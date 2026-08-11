@@ -1,0 +1,24 @@
+{
+  "id": "parallel-read",
+  "request": "Read a.txt and grep b.txt in the same model turn.",
+  "repo_files": ["a.txt", "b.txt"],
+  "responses": [
+    {
+      "tool_calls": [
+        {"id": "parallel-file", "name": "read_file", "arguments": {"file_path": "a.txt"}},
+        {"id": "parallel-grep", "name": "grep", "arguments": {"pattern": "bravo", "path": "b.txt"}}
+      ],
+      "prompt_tokens": 10,
+      "completion_tokens": 3
+    },
+    {"content": "parallel reads complete", "prompt_tokens": 8, "completion_tokens": 3}
+  ],
+  "expected": {
+    "final_answer": "parallel reads complete",
+    "tool_result_contains": {"parallel-file": "alpha", "parallel-grep": "bravo"},
+    "tool_events": [
+      {"tool_name": "read_file", "status": "ok"},
+      {"tool_name": "grep", "status": "ok"}
+    ]
+  }
+}
