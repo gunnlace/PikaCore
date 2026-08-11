@@ -16,6 +16,8 @@ class ToolOutput:
     error_code: str | None = None
     exit_code: int | None = None
     output_truncated: bool = False
+    read_paths: tuple[str, ...] | None = None
+    freshness_review_paths: tuple[str, ...] = ()
 
 
 class Tool(ABC):

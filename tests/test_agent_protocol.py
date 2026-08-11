@@ -7,6 +7,7 @@ from collections.abc import Callable
 import pytest
 
 from pikacore.agent import Agent
+from pikacore.checkpoint import INTERRUPTED_TOOL_RESULT
 from pikacore.llm import LLMResponse, ToolCall
 from pikacore.permissions import PermissionPolicy
 from pikacore.tools.agent import AgentTool
@@ -195,8 +196,8 @@ def test_interrupt_backfills_every_pending_tool_call():
 
     tool_messages = [message for message in agent.messages if message.get("role") == "tool"]
     assert [(message["tool_call_id"], message["content"]) for message in tool_messages] == [
-        ("interrupted-id", "[interrupted]"),
-        ("other-id", "[interrupted]"),
+        ("interrupted-id", INTERRUPTED_TOOL_RESULT),
+        ("other-id", INTERRUPTED_TOOL_RESULT),
     ]
     assert_tool_pairing(agent.messages)
 

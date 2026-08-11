@@ -92,6 +92,21 @@ class WorkspaceContext:
             fingerprints.append((relative_path, digest.hexdigest()))
         return WorkspaceSnapshot(tuple(fingerprints))
 
+    def current_branch(self) -> str | None:
+        """Return the current branch without relying on construction-time state."""
+        branch = _run_git(self.repo_root, "branch", "--show-current")
+        if branch is None:
+            return self.branch
+        return branch or None
+
+    def fingerprint_path(self, user_path: str | Path) -> tuple[str, str]:
+        """Fingerprint one relevant workspace path without traversing the repo."""
+        resolved = self.resolve_path(user_path, for_write=True)
+        relative = resolved.relative_to(self.repo_root).as_posix()
+        digest = hashlib.sha256()
+        _update_path_digest(digest, resolved)
+        return relative, digest.hexdigest()
+
     @staticmethod
     def _resolve_write_target(candidate: Path) -> Path:
         """Resolve existing symlink parents while allowing a missing final path."""
@@ -158,6 +173,7 @@ def _update_path_digest(digest, path: Path) -> None:
         if not path.is_file():
             digest.update(b"non-file\0")
             return
+        digest.update(b"file\0")
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                 digest.update(chunk)

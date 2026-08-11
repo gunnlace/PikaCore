@@ -1,10 +1,20 @@
 """Content search with regex support."""
 
 import re
-from .base import Tool
+from .base import Tool, ToolOutput
 
 # skip these dirs to avoid noise
-_SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", ".tox", "dist", "build"}
+_SKIP_DIRS = {
+    ".git",
+    ".pikacore",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".tox",
+    "dist",
+    "build",
+}
 
 
 class GrepTool(Tool):
@@ -34,37 +44,64 @@ class GrepTool(Tool):
     }
 
     def execute(self, pattern: str, path: str = ".", include: str | None = None) -> str:
+        return self._search(pattern, path, include)[0]
+
+    def execute_structured(
+        self,
+        pattern: str,
+        path: str = ".",
+        include: str | None = None,
+    ) -> ToolOutput:
+        content, read_paths, review_paths = self._search(pattern, path, include)
+        is_error = content.startswith(("Error", "Invalid regex"))
+        return ToolOutput(
+            content=content,
+            status="error" if is_error else "ok",
+            error_code="tool-error" if is_error else None,
+            read_paths=tuple(str(path) for path in read_paths),
+            freshness_review_paths=tuple(str(path) for path in review_paths),
+        )
+
+    def _search(self, pattern: str, path: str, include: str | None):
         try:
             regex = re.compile(pattern)
         except re.error as e:
-            return f"Invalid regex: {e}"
+            return f"Invalid regex: {e}", [], []
 
         try:
             base = self.resolve_path(path)
         except ValueError as e:
-            return f"Error: {e}"
+            return f"Error: {e}", [], []
         if not base.exists():
-            return f"Error: {path} not found"
+            return f"Error: {path} not found", [], []
 
         if base.is_file():
             files = [base]
+            review_paths = []
         else:
             files = self._walk(base, include)
+            review_paths = [base]
 
         matches = []
+        read_paths = []
         for fp in files:
             try:
                 text = fp.read_text(encoding="utf-8", errors="ignore")
             except OSError:
                 continue
+            read_paths.append(fp)
             for lineno, line in enumerate(text.splitlines(), 1):
                 if regex.search(line):
                     matches.append(f"{fp}:{lineno}: {line.rstrip()}")
                     if len(matches) >= 200:
                         matches.append("... (200 match limit reached)")
-                        return "\n".join(matches)
+                        return "\n".join(matches), read_paths, review_paths
 
-        return "\n".join(matches) if matches else "No matches found."
+        return (
+            "\n".join(matches) if matches else "No matches found.",
+            read_paths,
+            review_paths,
+        )
 
     def _walk(self, root, include: str | None) -> list:
         """Walk dir tree, skipping junk dirs."""

@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from pikacore.agent import Agent
+from pikacore.checkpoint import INTERRUPTED_TOOL_RESULT
 from pikacore.llm import LLMResponse, ToolCall
 from pikacore.permissions import PermissionPolicy
 from pikacore.state import RunState, SessionState
@@ -194,8 +195,8 @@ def test_interrupt_backfill_and_run_failure_are_persisted_before_reraise(tmp_pat
         for message in agent.messages
         if message.get("role") == "tool"
     ] == [
-        ("interrupt-id", "[interrupted]"),
-        ("pending-id", "[interrupted]"),
+        ("interrupt-id", INTERRUPTED_TOOL_RESULT),
+        ("pending-id", INTERRUPTED_TOOL_RESULT),
     ]
     run_id = agent.session_state.run_ids[-1]
     persisted_session = store.load_session(agent.session_state.session_id)
@@ -293,7 +294,7 @@ def test_executor_callback_failure_persists_protocol_backfill(tmp_path):
     assert agent.messages[-1] == {
         "role": "tool",
         "tool_call_id": "pending",
-        "content": "[interrupted]",
+        "content": INTERRUPTED_TOOL_RESULT,
     }
     run_id = agent.session_state.run_ids[-1]
     persisted = store.load_session(agent.session_state.session_id)

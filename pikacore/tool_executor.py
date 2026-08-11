@@ -23,6 +23,7 @@ class ToolExecutionResult:
     error_code: str | None = None
     duration_ms: int = 0
     read_paths: list[str] = field(default_factory=list)
+    freshness_review_paths: list[str] = field(default_factory=list)
     affected_paths: list[str] = field(default_factory=list)
     workspace_changed: bool = False
     exit_code: int | None = None
@@ -125,6 +126,10 @@ class ToolExecutor:
             workspace_changed=workspace_changed,
             exit_code=output.exit_code,
             output_truncated=output.output_truncated,
+            reported_read_paths=(
+                list(output.read_paths) if output.read_paths is not None else None
+            ),
+            freshness_review_paths=list(output.freshness_review_paths),
         )
 
     @staticmethod
@@ -174,7 +179,12 @@ class ToolExecutor:
                 continue
         return detected_paths, True
 
-    def execute_many(self, tool_calls, on_tool=None) -> list[ToolExecutionResult]:
+    def execute_many(
+        self,
+        tool_calls,
+        on_tool=None,
+        on_result=None,
+    ) -> list[ToolExecutionResult]:
         """Parallelize consecutive reads and serialize every mutating barrier."""
         for tool_call in tool_calls:
             if on_tool:
@@ -193,6 +203,9 @@ class ToolExecutor:
                         break
                     end += 1
                 self._execute_read_batch(tool_calls, results, index, end)
+                if on_result:
+                    for result_index in range(index, end):
+                        on_result(tool_calls[result_index], results[result_index])
                 reject_following_barrier = False
                 index = end
                 continue
@@ -207,6 +220,8 @@ class ToolExecutor:
                 result = self.execute_one(tool_calls[index])
                 results[index] = result
                 reject_following_barrier = result.status == "rejected"
+            if on_result:
+                on_result(tool_calls[index], results[index])
             index += 1
 
         return [result for result in results if result is not None]
@@ -244,10 +259,16 @@ class ToolExecutor:
         workspace_changed: bool = False,
         exit_code: int | None = None,
         output_truncated: bool = False,
+        reported_read_paths: list[str] | None = None,
+        freshness_review_paths: list[str] | None = None,
     ) -> ToolExecutionResult:
         arguments = arguments or {}
         path = arguments.get("file_path") or arguments.get("path")
-        read_paths = [path] if path and tool and tool.read_only else []
+        read_paths = (
+            reported_read_paths
+            if reported_read_paths is not None
+            else [path] if path and tool and tool.read_only else []
+        )
         explicit_paths = [path] if path and tool and not tool.read_only and status == "ok" else []
         affected_paths = list(dict.fromkeys(explicit_paths + (detected_paths or [])))
         return ToolExecutionResult(
@@ -258,6 +279,7 @@ class ToolExecutor:
             error_code=error_code,
             duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
             read_paths=read_paths,
+            freshness_review_paths=freshness_review_paths or [],
             affected_paths=affected_paths,
             workspace_changed=bool(explicit_paths) or workspace_changed,
             exit_code=exit_code,
