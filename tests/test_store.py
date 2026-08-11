@@ -5,7 +5,14 @@ import json
 import pytest
 
 from pikacore import store as store_module
-from pikacore.state import Report, RunState, SchemaMismatchError, SessionState, TraceEvent
+from pikacore.state import (
+    Checkpoint,
+    Report,
+    RunState,
+    SchemaMismatchError,
+    SessionState,
+    TraceEvent,
+)
 from pikacore.store import ProjectStore, atomic_write_json, read_json
 
 
@@ -30,17 +37,27 @@ def test_project_store_round_trips_versioned_artifacts(tmp_path):
     session = SessionState(session_id="session-1", repo_root="/repo", model="fake")
     run = RunState(run_id="run-1", session_id=session.session_id, user_request="hello")
     report = Report(run_id=run.run_id, session_id=session.session_id, completed=True)
+    checkpoint = Checkpoint(
+        checkpoint_id="checkpoint-1",
+        session_id=session.session_id,
+        run_id=run.run_id,
+    )
 
     store.save_session(session)
     store.save_run(run)
     store.save_report(report)
+    store.save_checkpoint(checkpoint)
 
     assert store.load_session(session.session_id) == session
     assert store.load_run(run.run_id) == run
     assert store.load_report(run.run_id) == report
+    assert store.load_checkpoint(checkpoint.checkpoint_id) == checkpoint
     assert store.session_path(session.session_id) == tmp_path / "sessions" / "session-1.json"
     assert store.task_state_path(run.run_id) == tmp_path / "runs" / "run-1" / "task_state.json"
     assert store.report_path(run.run_id) == tmp_path / "runs" / "run-1" / "report.json"
+    assert store.checkpoint_path(checkpoint.checkpoint_id) == (
+        tmp_path / "checkpoints" / "checkpoint-1.json"
+    )
 
 
 def test_trace_jsonl_is_recursive_redacted_and_string_limited(tmp_path):
@@ -110,6 +127,47 @@ def test_session_json_redacts_without_truncating_long_messages(tmp_path):
     assert persisted.messages[1]["content"] == "Bearer [REDACTED]"
 
 
+def test_checkpoint_redacts_pending_secrets_without_truncating_arguments(tmp_path):
+    store = ProjectStore(state_root=tmp_path)
+    checkpoint = Checkpoint(
+        checkpoint_id="checkpoint-secret",
+        pending_tool_calls=[{
+            "id": "call-1",
+            "name": "write_file",
+            "arguments": {
+                "api_key": "sk-sensitive-value",
+                "content": "x" * 5000,
+            },
+        }],
+    )
+
+    store.save_checkpoint(checkpoint)
+
+    persisted = store.load_checkpoint(checkpoint.checkpoint_id)
+    assert persisted is not None
+    arguments = persisted.pending_tool_calls[0]["arguments"]
+    assert arguments["api_key"] == "[REDACTED]"
+    assert arguments["content"] == "x" * 5000
+
+
+def test_checkpoint_preserves_freshness_hashes_for_secret_like_paths(tmp_path):
+    store = ProjectStore(state_root=tmp_path)
+    checkpoint = Checkpoint(
+        checkpoint_id="checkpoint-paths",
+        file_freshness={
+            "tokenizer.py": "a" * 64,
+            "src/api_keys.py": "b" * 64,
+            "credentials.txt": "c" * 64,
+        },
+    )
+
+    store.save_checkpoint(checkpoint)
+
+    persisted = store.load_checkpoint(checkpoint.checkpoint_id)
+    assert persisted is not None
+    assert persisted.file_freshness == checkpoint.file_freshness
+
+
 def test_trace_reader_ignores_only_a_corrupt_final_line(tmp_path):
     store = ProjectStore(state_root=tmp_path)
     event = TraceEvent(seq=1, session_id="session-1", run_id="run-1")
@@ -151,6 +209,8 @@ def test_store_rejects_identifier_path_traversal(tmp_path):
         store.session_path("../outside")
     with pytest.raises(ValueError, match="Invalid state identifier"):
         store.run_dir("/absolute")
+    with pytest.raises(ValueError, match="Invalid state identifier"):
+        store.checkpoint_path("../outside")
 
 
 def test_store_load_propagates_schema_mismatch(tmp_path):

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from pikacore import session as session_module
+from pikacore.checkpoint import RecoveryResult
 from pikacore.session import load_session, save_session
 from pikacore.state import SchemaMismatchError, SessionState
 from pikacore.store import atomic_write_json
@@ -200,6 +201,10 @@ def test_cli_resume_constructs_agent_with_complete_session_state(monkeypatch):
             observed["llm"] = llm
             observed["session_state"] = session_state
 
+        def recover_session(self):
+            observed["recovered"] = True
+            return RecoveryResult(status="full-valid")
+
     monkeypatch.setattr(cli, "_parse_args", lambda: args)
     monkeypatch.setattr(cli.Config, "from_env", lambda: Config(api_key="fake-key"))
     monkeypatch.setattr(cli, "load_session", lambda _session_id: state)
@@ -215,4 +220,5 @@ def test_cli_resume_constructs_agent_with_complete_session_state(monkeypatch):
 
     assert observed["session_state"] is state
     assert observed["llm"].model == "saved-model"
+    assert observed["recovered"] is True
     assert observed["prompt"] == "continue"

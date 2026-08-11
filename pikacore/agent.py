@@ -14,16 +14,26 @@ import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 
-from .llm import LLM
+from .checkpoint import (
+    INTERRUPTED_TOOL_RESULT,
+    RecoveryResult,
+    UNVERIFIABLE_FRESHNESS,
+    apply_recovery,
+    build_runtime_identity,
+    evaluate_recovery,
+    schema_mismatch_result,
+    serialize_tool_call,
+)
+from .llm import LLM, ToolCall
 from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
 from .context import ContextManager, estimate_tokens
 from .permissions import PermissionPolicy
-from .state import Report, RunState, SessionState, TraceEvent, utc_now
+from .state import Checkpoint, Report, RunState, SchemaMismatchError, SessionState, TraceEvent, utc_now
 from .store import ProjectStore
-from .tool_executor import ApprovalCallback, ToolExecutor
+from .tool_executor import ApprovalCallback, ToolExecutionResult, ToolExecutor
 from .workspace import WorkspaceContext
 
 
@@ -43,6 +53,10 @@ class _RunMetrics:
     context_tokens_before: int = 0
     context_tokens_after: int = 0
     persistence_errors: list[str] = field(default_factory=list)
+
+
+class CheckpointPersistenceError(RuntimeError):
+    """Raised when safe continuation requires a checkpoint that cannot be saved."""
 
 
 class Agent:
@@ -85,6 +99,12 @@ class Agent:
         self.current_run: RunState | None = None
         self._run_metrics: _RunMetrics | None = None
         self._trace_seq = 0
+        self._completed_tool_call_ids: list[str] = []
+        self._pending_tool_calls: list[dict] = []
+        self._file_freshness: dict[str, str] = {}
+        self._last_successful_action: str | None = None
+        self._checkpoint_status: str | None = None
+        self.recovery_result: RecoveryResult | None = None
         self.context = ContextManager(max_tokens=max_context_tokens)
         self.max_rounds = max_rounds
         self._system = system_prompt(self.tools)
@@ -170,19 +190,49 @@ class Agent:
                             "arguments": tool_call.arguments,
                         },
                     )
+                self._pending_tool_calls = [
+                    serialize_tool_call(tool_call) for tool_call in resp.tool_calls
+                ]
+                self._require_checkpoint(
+                    last_successful_action="assistant_tool_calls_saved",
+                    next_suggested_action=(
+                        "inspect workspace before deciding whether to retry pending tools"
+                    ),
+                )
 
                 try:
-                    results = self.tool_executor.execute_many(
-                        resp.tool_calls,
-                        on_tool=on_tool,
-                    )
-                    for tool_call, result in zip(resp.tool_calls, results):
+                    result_index = 0
+
+                    def persist_result(tool_call, result):
+                        nonlocal result_index
                         self._record_tool_result(tool_call, result)
                         self._append_message({
                             "role": "tool",
                             "tool_call_id": tool_call.id,
                             "content": result.content,
                         })
+                        tool = self._tool_by_name.get(tool_call.name)
+                        next_tool = (
+                            self._tool_by_name.get(
+                                resp.tool_calls[result_index + 1].name
+                            )
+                            if result_index + 1 < len(resp.tool_calls)
+                            else None
+                        )
+                        read_batch_finished = bool(
+                            tool is not None
+                            and tool.read_only
+                            and (next_tool is None or not next_tool.read_only)
+                        )
+                        if tool is None or not tool.read_only or read_batch_finished:
+                            self._require_checkpoint()
+                        result_index += 1
+
+                    self.tool_executor.execute_many(
+                        resp.tool_calls,
+                        on_tool=on_tool,
+                        on_result=persist_result,
+                    )
                 except KeyboardInterrupt:
                     # Persist one backfill per pending call before propagating.
                     self._answer_pending_tool_calls(resp.tool_calls)
@@ -242,8 +292,11 @@ class Agent:
                 self._append_message({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": "[interrupted]",
+                    "content": INTERRUPTED_TOOL_RESULT,
                 })
+                self._pending_tool_calls = [
+                    call for call in self._pending_tool_calls if call.get("id") != tc.id
+                ]
 
     def _start_run(self, user_input: str) -> RunState:
         if self.current_run is not None:
@@ -254,6 +307,10 @@ class Agent:
         )
         self.current_run = run
         self._trace_seq = 0
+        self._completed_tool_call_ids = []
+        self._pending_tool_calls = []
+        self._last_successful_action = None
+        self._checkpoint_status = None
         self._run_metrics = _RunMetrics(
             started_perf=time.perf_counter(),
         )
@@ -300,6 +357,7 @@ class Agent:
             "context_compressed",
             {"before_tokens": before, "after_tokens": after},
         )
+        self._require_checkpoint(last_successful_action="context_compressed")
         return True
 
     def _record_tool_result(self, tool_call, result) -> None:
@@ -317,6 +375,15 @@ class Agent:
             metrics.tool_approvals[tool_call.name] += 1
         metrics.read_paths.update(result.read_paths)
         metrics.affected_paths.update(result.affected_paths)
+        if tool_call.id not in self._completed_tool_call_ids:
+            self._completed_tool_call_ids.append(tool_call.id)
+        self._pending_tool_calls = [
+            call for call in self._pending_tool_calls if call.get("id") != tool_call.id
+        ]
+        self._refresh_file_freshness(result.read_paths + result.affected_paths)
+        self._mark_freshness_review(result.freshness_review_paths)
+        if result.status == "ok":
+            self._last_successful_action = f"tool:{tool_call.name}"
         self._save_run()
 
         event_data = {
@@ -326,6 +393,7 @@ class Agent:
             "error_code": result.error_code,
             "duration_ms": result.duration_ms,
             "read_paths": result.read_paths,
+            "freshness_review_paths": result.freshness_review_paths,
             "affected_paths": result.affected_paths,
             "workspace_changed": result.workspace_changed,
             "exit_code": result.exit_code,
@@ -357,6 +425,9 @@ class Agent:
         run.final_answer = final_answer
         run.error = error
         self._save_run()
+        if status == "completed":
+            self._last_successful_action = "run_completed"
+        self._create_checkpoint(last_successful_action=self._last_successful_action)
         self._trace(
             "run_finished" if status == "completed" else "run_failed",
             {"status": status, "stop_reason": stop_reason, "error": error},
@@ -386,6 +457,10 @@ class Agent:
             context_compressions=metrics.context_compressions,
             context_tokens_before=metrics.context_tokens_before,
             context_tokens_after=metrics.context_tokens_after,
+            checkpoint_status=self._checkpoint_status,
+            recovery_status=(
+                self.recovery_result.status if self.recovery_result is not None else None
+            ),
             stop_reason=stop_reason,
             completed=status == "completed",
             error=error,
@@ -395,6 +470,149 @@ class Agent:
             self._safe_store("save report", self.store.save_report, report)
         self.current_run = None
         self._run_metrics = None
+
+    def recover_session(self) -> RecoveryResult:
+        """Validate and safely repair a loaded session without replaying tools."""
+        checkpoint_id = self.session_state.last_checkpoint_id
+        checkpoint = None
+        if checkpoint_id is not None and self.store is not None:
+            try:
+                checkpoint = self.store.load_checkpoint(checkpoint_id)
+            except (SchemaMismatchError, TypeError, ValueError, KeyError, OSError):
+                result = schema_mismatch_result(checkpoint_id)
+                self.recovery_result = result
+                return result
+
+        if checkpoint is not None and checkpoint.session_id == self.session_state.session_id:
+            self._file_freshness = dict(checkpoint.file_freshness)
+
+        result = evaluate_recovery(
+            self.session_state,
+            checkpoint,
+            current_runtime=self._runtime_identity(),
+            workspace=self.workspace,
+        )
+        self.recovery_result = result
+        if apply_recovery(self.session_state, result):
+            self._save_session()
+        return result
+
+    def _runtime_identity(self) -> dict:
+        return build_runtime_identity(
+            model=getattr(self.llm, "model", "unknown"),
+            workspace=self.workspace,
+            tools=self.tools,
+            permission_policy=self.permission_policy,
+        )
+
+    def _refresh_file_freshness(self, paths: list[str]) -> None:
+        for path in paths:
+            try:
+                relative, fingerprint = self.workspace.fingerprint_path(path)
+            except (OSError, ValueError):
+                continue
+            self._file_freshness[relative] = fingerprint
+
+    def _mark_freshness_review(self, paths: list[str]) -> None:
+        for path in paths:
+            try:
+                resolved = self.workspace.resolve_path(path)
+                relative = resolved.relative_to(self.workspace.repo_root).as_posix()
+            except (OSError, ValueError):
+                continue
+            self._file_freshness[relative] = UNVERIFIABLE_FRESHNESS
+
+    def _require_checkpoint(
+        self,
+        *,
+        last_successful_action: str | None = None,
+        next_suggested_action: str | None = None,
+    ) -> Checkpoint | None:
+        checkpoint = self._create_checkpoint(
+            last_successful_action=last_successful_action,
+            next_suggested_action=next_suggested_action,
+        )
+        if self.store is not None and checkpoint is None:
+            self._fail_pending_for_checkpoint_error()
+            raise CheckpointPersistenceError(
+                "required checkpoint could not be persisted; pending tools were not executed"
+            )
+        return checkpoint
+
+    def _fail_pending_for_checkpoint_error(self) -> None:
+        pending = list(self._pending_tool_calls)
+        for call in pending:
+            tool_call = ToolCall(
+                id=call.get("id"),
+                name=call.get("name", "unknown"),
+                arguments=call.get("arguments", {}),
+            )
+            result = ToolExecutionResult(
+                tool_call_id=tool_call.id,
+                tool_name=tool_call.name,
+                content=(
+                    "Error: tool was not executed because the required checkpoint "
+                    "could not be persisted."
+                ),
+                status="error",
+                error_code="checkpoint-failed",
+            )
+            self._record_tool_result(tool_call, result)
+            self._append_message({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": result.content,
+            })
+
+    def _create_checkpoint(
+        self,
+        *,
+        last_successful_action: str | None = None,
+        next_suggested_action: str | None = None,
+    ) -> Checkpoint | None:
+        if self.store is None or self.current_run is None:
+            return None
+        if last_successful_action is not None:
+            self._last_successful_action = last_successful_action
+        checkpoint = Checkpoint(
+            parent_checkpoint_id=self.session_state.last_checkpoint_id,
+            session_id=self.session_state.session_id,
+            run_id=self.current_run.run_id,
+            current_user_request=self.current_run.user_request,
+            completed_tool_call_ids=list(self._completed_tool_call_ids),
+            pending_tool_calls=list(self._pending_tool_calls),
+            last_successful_action=self._last_successful_action,
+            next_suggested_action=(
+                next_suggested_action
+                if next_suggested_action is not None
+                else (
+                    "inspect workspace before deciding whether to retry pending tools"
+                    if self._pending_tool_calls
+                    else None
+                )
+            ),
+            file_freshness=dict(sorted(self._file_freshness.items())),
+            runtime_identity=self._runtime_identity(),
+        )
+        if not self._safe_store(
+            "save checkpoint", self.store.save_checkpoint, checkpoint
+        ):
+            self._checkpoint_status = "error"
+            return None
+        self.session_state.last_checkpoint_id = checkpoint.checkpoint_id
+        if self._checkpoint_status != "error":
+            self._checkpoint_status = "created"
+        self._save_session()
+        self._trace(
+            "checkpoint_created",
+            {
+                "checkpoint_id": checkpoint.checkpoint_id,
+                "parent_checkpoint_id": checkpoint.parent_checkpoint_id,
+                "pending_tool_count": len(checkpoint.pending_tool_calls),
+                "completed_tool_count": len(checkpoint.completed_tool_call_ids),
+            },
+        )
+        return checkpoint
 
     def _save_session(self) -> None:
         self.session_state.model = getattr(self.llm, "model", "unknown")
@@ -419,14 +637,16 @@ class Agent:
         )
         self._safe_store("append trace", self.store.append_trace, trace_event)
 
-    def _safe_store(self, action: str, operation, *args) -> None:
+    def _safe_store(self, action: str, operation, *args) -> bool:
         try:
             operation(*args)
+            return True
         except Exception as exc:
             message = f"{action} failed: {type(exc).__name__}: {exc}"
             if self._run_metrics is not None:
                 self._run_metrics.persistence_errors.append(message)
             warnings.warn(message, RuntimeWarning, stacklevel=2)
+            return False
 
     def reset(self):
         """Clear conversation history."""

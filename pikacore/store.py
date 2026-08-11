@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .security import redact
-from .state import Report, RunState, SessionState, TraceEvent
+from .state import Checkpoint, Report, RunState, SessionState, TraceEvent
 
 _SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -88,6 +88,10 @@ class ProjectStore:
     def runs_dir(self) -> Path:
         return self.state_root / "runs"
 
+    @property
+    def checkpoints_dir(self) -> Path:
+        return self.state_root / "checkpoints"
+
     def session_path(self, session_id: str) -> Path:
         return self.sessions_dir / f"{_safe_component(session_id)}.json"
 
@@ -102,6 +106,9 @@ class ProjectStore:
 
     def report_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "report.json"
+
+    def checkpoint_path(self, checkpoint_id: str) -> Path:
+        return self.checkpoints_dir / f"{_safe_component(checkpoint_id)}.json"
 
     def save_session(self, state: SessionState) -> None:
         atomic_write_json(
@@ -126,6 +133,24 @@ class ProjectStore:
         if not path.exists():
             return None
         return RunState.from_dict(read_json(path))
+
+    def save_checkpoint(self, checkpoint: Checkpoint) -> None:
+        data = checkpoint.to_dict()
+        # file_freshness keys are workspace paths, not secret field names. A
+        # path such as tokenizer.py must retain its SHA-256 value verbatim.
+        file_freshness = dict(data.pop("file_freshness", {}))
+        persisted = redact(data, max_string_length=None)
+        persisted["file_freshness"] = file_freshness
+        atomic_write_json(
+            self.checkpoint_path(checkpoint.checkpoint_id),
+            persisted,
+        )
+
+    def load_checkpoint(self, checkpoint_id: str) -> Checkpoint | None:
+        path = self.checkpoint_path(checkpoint_id)
+        if not path.exists():
+            return None
+        return Checkpoint.from_dict(read_json(path))
 
     def append_trace(self, event: TraceEvent) -> None:
         append_jsonl(self.trace_path(event.run_id), event.to_dict())

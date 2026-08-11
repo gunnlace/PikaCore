@@ -44,7 +44,7 @@ def _validate_schema(data: dict[str, Any]) -> None:
 
 
 class PersistedState:
-    """Small serialization mixin shared by Phase 3 dataclasses."""
+    """Small serialization mixin shared by versioned state dataclasses."""
 
     _fields: ClassVar[tuple[str, ...]]
 
@@ -116,6 +116,39 @@ class RunState(PersistedState):
         "tool_steps",
         "final_answer",
         "error",
+    )
+
+
+@dataclass
+class Checkpoint(PersistedState):
+    schema_version: int = SCHEMA_VERSION
+    checkpoint_id: str = field(default_factory=lambda: new_id("checkpoint"))
+    parent_checkpoint_id: str | None = None
+    session_id: str = ""
+    run_id: str = ""
+    current_user_request: str = ""
+    completed_tool_call_ids: list[str] = field(default_factory=list)
+    pending_tool_calls: list[dict] = field(default_factory=list)
+    last_successful_action: str | None = None
+    next_suggested_action: str | None = None
+    file_freshness: dict[str, str] = field(default_factory=dict)
+    runtime_identity: dict[str, Any] = field(default_factory=dict)
+    created_at: str = field(default_factory=utc_now)
+
+    _fields = (
+        "schema_version",
+        "checkpoint_id",
+        "parent_checkpoint_id",
+        "session_id",
+        "run_id",
+        "current_user_request",
+        "completed_tool_call_ids",
+        "pending_tool_calls",
+        "last_successful_action",
+        "next_suggested_action",
+        "file_freshness",
+        "runtime_identity",
+        "created_at",
     )
 
 

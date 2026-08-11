@@ -117,7 +117,18 @@ def main():
     )
 
     if resumed_state is not None:
-        console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
+        recovery = agent.recover_session()
+        if not recovery.can_resume:
+            console.print(
+                f"[red]Cannot resume session '{args.resume}': {recovery.status}.[/red]"
+            )
+            sys.exit(1)
+        console.print(
+            f"[green]Resumed session: {args.resume} "
+            f"(model: {agent.llm.model}, recovery: {recovery.status})[/green]"
+        )
+        if recovery.notice is not None:
+            console.print(recovery.notice, style="yellow", markup=False)
 
     # one-shot mode
     if args.prompt:

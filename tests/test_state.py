@@ -4,6 +4,7 @@ import pytest
 
 from pikacore.state import (
     SCHEMA_VERSION,
+    Checkpoint,
     Report,
     RunState,
     SchemaMismatchError,
@@ -17,6 +18,7 @@ from pikacore.state import (
     [
         SessionState(repo_root="/repo", model="fake", messages=[{"role": "user"}]),
         RunState(session_id="session-1", user_request="test"),
+        Checkpoint(session_id="session-1", run_id="run-1"),
         TraceEvent(seq=1, session_id="session-1", run_id="run-1", data={"ok": True}),
         Report(run_id="run-1", session_id="session-1", completed=True),
     ],
@@ -28,7 +30,9 @@ def test_state_models_round_trip_through_dict(state):
     assert restored.schema_version == SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("state_type", [SessionState, RunState, TraceEvent, Report])
+@pytest.mark.parametrize(
+    "state_type", [SessionState, RunState, Checkpoint, TraceEvent, Report]
+)
 def test_state_models_fail_closed_on_unknown_schema(state_type):
     with pytest.raises(SchemaMismatchError) as exc_info:
         state_type.from_dict({"schema_version": SCHEMA_VERSION + 1})
