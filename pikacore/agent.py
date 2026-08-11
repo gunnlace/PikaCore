@@ -729,6 +729,17 @@ class Agent:
             return False
 
     def reset(self):
-        """Clear conversation history."""
+        """Clear conversation, Working Memory, and recovery continuity."""
         self.messages.clear()
+        self.session_state.working_memory = WorkingMemory()
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
+        self.session_state.last_checkpoint_id = None
+        self._file_freshness.clear()
+        self._completed_tool_call_ids.clear()
+        self._pending_tool_calls.clear()
+        self._last_successful_action = None
+        self.recovery_result = None
         self._save_session()

@@ -120,7 +120,9 @@ class WorkingMemoryManager:
                     fresh=fingerprint is not None,
                     updated_at=event.occurred_at,
                 ))
-                self._remove_value(self.memory.next_steps, f"Reread {path}")
+                if fingerprint is not None:
+                    self._remove_value(self.memory.next_steps, f"Reread {path}")
+                    self._resolve_stale_blocker(path)
                 changed = True
 
         if event.tool_name in {"write_file", "edit_file"} and result.status == "ok":
@@ -205,13 +207,10 @@ class WorkingMemoryManager:
                     item.fresh = False
                     item.updated_at = event.occurred_at
                 self._append_unique(self.memory.next_steps, f"Reread {path}")
-            self._append_unique(
-                self.memory.blockers,
-                _compact(
-                    f"Recovery found stale files: {', '.join(result.stale_paths)}",
-                    MAX_ITEM_CHARS,
-                ),
-            )
+                self._append_unique(
+                    self.memory.blockers,
+                    _compact(f"Recovery found stale file: {path}", MAX_ITEM_CHARS),
+                )
             changed = True
         elif result.status == "runtime-mismatch":
             keys = ", ".join(sorted(result.runtime_differences))
@@ -285,6 +284,32 @@ class WorkingMemoryManager:
     @staticmethod
     def _remove_value(values: list[str], value: str) -> None:
         values[:] = [item for item in values if item != value]
+
+    def _resolve_stale_blocker(self, path: str) -> None:
+        """Resolve one structured recovery conflict, including old persisted format."""
+        singular = f"Recovery found stale file: {path}"
+        plural_prefix = "Recovery found stale files: "
+        updated = []
+        for blocker in self.memory.blockers:
+            if blocker == singular:
+                continue
+            if not blocker.startswith(plural_prefix):
+                updated.append(blocker)
+                continue
+            stale_paths = [
+                item.strip()
+                for item in blocker[len(plural_prefix):].split(",")
+                if item.strip()
+            ]
+            if path not in stale_paths:
+                updated.append(blocker)
+                continue
+            remaining = [item for item in stale_paths if item != path]
+            if len(remaining) == 1:
+                updated.append(f"Recovery found stale file: {remaining[0]}")
+            elif remaining:
+                updated.append(f"{plural_prefix}{', '.join(remaining)}")
+        self.memory.blockers[:] = updated
 
     def _enforce_capacity(self) -> None:
         self.memory.files[:] = self.memory.files[-MAX_FILES:]

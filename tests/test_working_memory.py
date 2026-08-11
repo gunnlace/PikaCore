@@ -211,8 +211,30 @@ def test_recovery_events_mark_freshness_blockers_and_deterministic_checks(tmp_pa
     assert memory.files[0].fresh is False
     assert "Reread tracked.py" in memory.next_steps
     assert any("Inspect workspace" in item for item in memory.next_steps)
-    assert any("stale files" in item for item in memory.blockers)
+    assert any("stale file" in item for item in memory.blockers)
     assert any("incomplete tool calls" in item for item in memory.blockers)
+
+
+def test_successful_reread_resolves_only_its_stale_recovery_state(tmp_path):
+    for name in ("a.py", "b.py"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+    memory = WorkingMemory()
+    manager = WorkingMemoryManager(memory, WorkspaceContext(tmp_path))
+    manager.apply(RecoveryMemoryEvent(
+        result=RecoveryResult(status="files-stale", stale_paths=["a.py", "b.py"]),
+        occurred_at="recovery",
+    ))
+
+    manager.apply(_tool_event(
+        "read_file",
+        _result("read_file", content="a.py", read_paths=["a.py"]),
+        arguments={"file_path": "a.py"},
+    ))
+
+    assert "Reread a.py" not in memory.next_steps
+    assert "Recovery found stale file: a.py" not in memory.blockers
+    assert "Reread b.py" in memory.next_steps
+    assert "Recovery found stale file: b.py" in memory.blockers
 
 
 def test_run_event_has_no_final_answer_channel_or_phrase_parser(tmp_path):
@@ -259,3 +281,27 @@ def test_agent_persists_and_prompts_with_working_memory_without_api_calls(tmp_pa
     assert "[Working memory]" in llm.calls[0][1]["content"]
     assert "sample.txt (read, fresh)" in llm.calls[1][1]["content"]
     assert not (store.state_root / "memory").exists()
+
+
+def test_reset_clears_persisted_working_memory_and_checkpoint_continuity(tmp_path):
+    store = ProjectStore(state_root=tmp_path / "state")
+    agent = Agent(
+        llm=FakeLLM([LLMResponse(content="done")]),
+        tools=[],
+        workspace=WorkspaceContext(tmp_path),
+        store=store,
+    )
+    agent.chat("old task")
+    assert agent.session_state.last_checkpoint_id is not None
+    agent._file_freshness["old.py"] = "old-hash"
+
+    agent.reset()
+    restored = store.load_session(agent.session_state.session_id)
+
+    assert restored is not None
+    assert restored.messages == []
+    assert restored.working_memory.current_request == ""
+    assert restored.working_memory.files == []
+    assert restored.last_checkpoint_id is None
+    assert agent._file_freshness == {}
+    assert [message["role"] for message in agent._full_messages()] == ["system"]

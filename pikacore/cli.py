@@ -218,7 +218,7 @@ def _repl(agent: Agent, config: Config):
             continue
         if user_input == "/reset":
             agent.reset()
-            console.print("[yellow]Conversation reset.[/yellow]")
+            console.print("[yellow]Conversation and Working Memory reset.[/yellow]")
             continue
         if user_input == "/tokens":
             p = agent.llm.total_prompt_tokens
