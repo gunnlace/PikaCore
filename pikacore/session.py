@@ -4,11 +4,14 @@ Claude Code maintains session state via QueryEngine (1295 lines).
 PikaCore distills this to: JSON dump of messages + model config.
 """
 
-import json
 import re
 import time
 import uuid
 from pathlib import Path
+
+from .security import redact
+from .state import SchemaMismatchError, SessionState, utc_now
+from .store import atomic_write_json, read_json
 
 
 def _find_repo_root(start: Path | None = None) -> Path:
@@ -54,28 +57,45 @@ def save_session(messages: list[dict], model: str, session_id: str | None = None
 
     session_id = _normalize_session_id(session_id)
 
-    data = {
-        "id": session_id,
-        "model": model,
-        "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "messages": messages,
-    }
+    timestamp = utc_now()
+    state = SessionState(
+        session_id=session_id,
+        created_at=timestamp,
+        updated_at=timestamp,
+        repo_root=str(_find_repo_root()),
+        model=model,
+        messages=messages,
+    )
 
     path = _session_path(session_id)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_json(path, redact(state.to_dict(), max_string_length=None))
     return session_id
 
 
-def load_session(session_id: str) -> tuple[list[dict], str] | None:
-    """Load a saved session. Returns (messages, model) or None."""
+def load_session(session_id: str) -> SessionState | None:
+    """Load the complete saved session, upgrading the legacy shape if needed."""
     path = _session_path(session_id)
     if not path.exists():
         return None
 
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return data["messages"], data["model"]
-    except (json.JSONDecodeError, KeyError, OSError):
+        data = read_json(path)
+        if "schema_version" not in data:
+            timestamp = data.get("saved_at") or utc_now()
+            return SessionState(
+                session_id=_normalize_session_id(
+                    data.get("session_id", data.get("id", session_id))
+                ),
+                created_at=timestamp,
+                updated_at=timestamp,
+                repo_root=str(_find_repo_root()),
+                model=data["model"],
+                messages=data["messages"],
+            )
+        return SessionState.from_dict(data)
+    except SchemaMismatchError:
+        raise
+    except (TypeError, ValueError, KeyError, OSError):
         # a corrupt or truncated session file shouldn't crash resume
         return None
 
@@ -88,7 +108,7 @@ def list_sessions() -> list[dict]:
     sessions = []
     for f in sorted(SESSIONS_DIR.glob("*.json"), reverse=True):
         try:
-            data = json.loads(f.read_text(encoding="utf-8"))
+            data = read_json(f)
             # grab first user message as preview
             preview = ""
             for m in data.get("messages", []):
@@ -96,12 +116,12 @@ def list_sessions() -> list[dict]:
                     preview = m["content"][:80]
                     break
             sessions.append({
-                "id": data.get("id", f.stem),
+                "id": data.get("session_id", data.get("id", f.stem)),
                 "model": data.get("model", "?"),
-                "saved_at": data.get("saved_at", "?"),
+                "saved_at": data.get("updated_at", data.get("saved_at", "?")),
                 "preview": preview,
             })
-        except (json.JSONDecodeError, KeyError):
+        except (ValueError, KeyError, OSError):
             continue
 
     return sessions[:20]  # cap at 20

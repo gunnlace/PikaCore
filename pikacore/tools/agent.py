@@ -51,6 +51,11 @@ class AgentTool(Tool):
             workspace=parent.workspace,
             permission_policy=parent.permission_policy,
             approval_callback=parent.approval_callback,
+            store=parent.store,
+            persist=parent.store is not None,
+            parent_run_id=(
+                parent.current_run.run_id if parent.current_run is not None else None
+            ),
         )
 
         try:

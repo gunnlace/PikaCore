@@ -123,7 +123,7 @@ def test_tool_calls_are_paired_exactly_once_across_rounds():
         _tool_round(_tool_call("call-c", value="c")),
         _final("done"),
     ])
-    agent = Agent(llm=llm, tools=[EchoTool()])
+    agent = Agent(llm=llm, tools=[EchoTool()], persist=False)
 
     assert agent.chat("run tools") == "done"
     assert_tool_pairing(agent.messages)
@@ -151,7 +151,7 @@ def test_parallel_results_keep_model_order_even_when_completion_order_differs():
         ),
         _final("ordered"),
     ])
-    agent = Agent(llm=llm, tools=[tool])
+    agent = Agent(llm=llm, tools=[tool], persist=False)
 
     assert agent.chat("run in parallel") == "ordered"
     assert tool.completion_order == ["second", "first"]
@@ -171,7 +171,7 @@ def test_bad_arguments_and_internal_type_errors_become_distinct_tool_results():
         ),
         _final("recovered"),
     ])
-    agent = Agent(llm=llm, tools=[EchoTool(), BoomTool()])
+    agent = Agent(llm=llm, tools=[EchoTool(), BoomTool()], persist=False)
 
     assert agent.chat("exercise errors") == "recovered"
     tool_messages = [message for message in agent.messages if message.get("role") == "tool"]
@@ -188,7 +188,7 @@ def test_interrupt_backfills_every_pending_tool_call():
             _tool_call("other-id", value="other"),
         ),
     ])
-    agent = Agent(llm=llm, tools=[InterruptTool(), EchoTool()])
+    agent = Agent(llm=llm, tools=[InterruptTool(), EchoTool()], persist=False)
 
     with pytest.raises(KeyboardInterrupt):
         agent.chat("interrupt this round")
@@ -206,7 +206,7 @@ def test_streaming_callback_and_complete_assistant_history_are_both_preserved():
         [_final("streamed reply")],
         stream_chunks={0: ["streamed ", "reply"]},
     )
-    agent = Agent(llm=llm, tools=[])
+    agent = Agent(llm=llm, tools=[], persist=False)
     streamed: list[str] = []
 
     result = agent.chat("stream", on_token=streamed.append)
@@ -224,7 +224,7 @@ def test_tool_resolution_is_scoped_to_each_agent_instance():
         ),
         _final("outside done"),
     ])
-    outside_agent = Agent(llm=outside_llm, tools=[NamedTool("outside")])
+    outside_agent = Agent(llm=outside_llm, tools=[NamedTool("outside")], persist=False)
 
     inside_llm = FakeLLM([
         _tool_round(
@@ -233,7 +233,7 @@ def test_tool_resolution_is_scoped_to_each_agent_instance():
         ),
         _final("inside done"),
     ])
-    inside_agent = Agent(llm=inside_llm, tools=[NamedTool("inside")])
+    inside_agent = Agent(llm=inside_llm, tools=[NamedTool("inside")], persist=False)
 
     assert outside_agent.chat("check outside scope") == "outside done"
     assert inside_agent.chat("check inside scope") == "inside done"
@@ -274,6 +274,7 @@ def test_sub_agent_cannot_access_agent_tool_recursively():
         llm=llm,
         tools=[AgentTool()],
         permission_policy=PermissionPolicy("auto"),
+        persist=False,
     )
 
     assert agent.chat("use a sub-agent") == "parent finished"
@@ -300,7 +301,7 @@ def test_max_rounds_stops_after_exactly_the_configured_tool_rounds():
         return _tool_round(_tool_call(f"round-{call_index}", value=str(call_index)))
 
     llm = FakeLLM(response_factory=keep_calling)
-    agent = Agent(llm=llm, tools=[EchoTool()], max_rounds=3)
+    agent = Agent(llm=llm, tools=[EchoTool()], max_rounds=3, persist=False)
 
     assert agent.chat("never finish") == "(reached maximum tool-call rounds)"
     assert len(llm.calls) == 3
