@@ -1,0 +1,25 @@
+{
+  "id": "path-escape",
+  "request": "Attempt the requested outside read and write without escaping the workspace.",
+  "repo_files": ["safe.txt"],
+  "permission_mode": "auto",
+  "responses": [
+    {
+      "tool_calls": [
+        {"id": "escape-read", "name": "read_file", "arguments": {"file_path": "../outside.txt"}},
+        {"id": "escape-write", "name": "write_file", "arguments": {"file_path": "../outside.txt", "content": "escaped\n"}}
+      ],
+      "prompt_tokens": 9,
+      "completion_tokens": 3
+    },
+    {"content": "path escape rejected", "prompt_tokens": 7, "completion_tokens": 3}
+  ],
+  "expected": {
+    "final_answer": "path escape rejected",
+    "files_absent": ["../outside.txt"],
+    "tool_events": [
+      {"tool_name": "read_file", "status": "error", "error_code": "path-rejected"},
+      {"tool_name": "write_file", "status": "error", "error_code": "path-rejected"}
+    ]
+  }
+}

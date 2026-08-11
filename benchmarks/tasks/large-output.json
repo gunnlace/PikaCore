@@ -1,0 +1,24 @@
+{
+  "id": "large-output",
+  "request": "Run the deterministic large-output command and finish after compression.",
+  "repo_files": ["seed.txt"],
+  "permission_mode": "auto",
+  "max_context_tokens": 200,
+  "responses": [
+    {
+      "tool_calls": [
+        {"id": "large-bash", "name": "bash", "arguments": {"command": "fixture-large-output"}}
+      ],
+      "prompt_tokens": 10,
+      "completion_tokens": 3
+    },
+    {"content": "large output complete", "prompt_tokens": 8, "completion_tokens": 3}
+  ],
+  "expected": {
+    "final_answer": "large output complete",
+    "compression_min": 1,
+    "tool_events": [
+      {"tool_name": "bash", "status": "ok", "exit_code": 0, "output_truncated": true}
+    ]
+  }
+}
