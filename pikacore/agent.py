@@ -29,12 +29,30 @@ from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
-from .context import ContextManager, estimate_tokens
+from .context import CompressionResult, ContextManager, estimate_tokens
 from .permissions import PermissionPolicy
-from .state import Checkpoint, Report, RunState, SchemaMismatchError, SessionState, TraceEvent, utc_now
+from .state import (
+    Checkpoint,
+    Report,
+    RunState,
+    SchemaMismatchError,
+    SessionState,
+    TraceEvent,
+    WorkingMemory,
+    utc_now,
+)
 from .store import ProjectStore
 from .tool_executor import ApprovalCallback, ToolExecutionResult, ToolExecutor
 from .workspace import WorkspaceContext
+from .working_memory import (
+    CheckpointMemoryEvent,
+    RecoveryMemoryEvent,
+    RunMemoryEvent,
+    ToolMemoryEvent,
+    UserMemoryEvent,
+    WorkingMemoryManager,
+    render_working_memory,
+)
 
 
 @dataclass
@@ -52,6 +70,7 @@ class _RunMetrics:
     context_compressions: int = 0
     context_tokens_before: int = 0
     context_tokens_after: int = 0
+    context_compression_events: list[dict] = field(default_factory=list)
     persistence_errors: list[str] = field(default_factory=list)
 
 
@@ -92,6 +111,13 @@ class Agent:
             repo_root=str(self.workspace.repo_root),
             model=model,
         )
+        self.session_state.working_memory = WorkingMemory.from_dict(
+            self.session_state.working_memory
+        )
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
         self.store = store if store is not None else (
             ProjectStore(repo_root=self.workspace.repo_root) if persist else None
         )
@@ -115,7 +141,11 @@ class Agent:
                 t._parent_agent = self
 
     def _full_messages(self) -> list[dict]:
-        return [{"role": "system", "content": self._system}] + self.messages
+        full = [{"role": "system", "content": self._system}]
+        rendered_memory = render_working_memory(self.session_state.working_memory)
+        if rendered_memory:
+            full.append({"role": "system", "content": rendered_memory})
+        return full + self.messages
 
     def _tool_schemas(self) -> list[dict]:
         return [t.schema() for t in self.tools]
@@ -298,7 +328,12 @@ class Agent:
                     call for call in self._pending_tool_calls if call.get("id") != tc.id
                 ]
 
-    def _start_run(self, user_input: str) -> RunState:
+    def _start_run(
+        self,
+        user_input: str,
+        *,
+        update_working_memory: bool = True,
+    ) -> RunState:
         if self.current_run is not None:
             raise RuntimeError("Agent already has an active run")
         run = RunState(
@@ -316,6 +351,13 @@ class Agent:
         )
         self.session_state.run_ids.append(run.run_id)
         self.session_state.touch()
+        memory_changed = False
+        if update_working_memory:
+            memory_changed = self.working_memory.apply(UserMemoryEvent(
+                request=user_input,
+                run_id=run.run_id,
+                occurred_at=utc_now(),
+            ))
         self._save_run()
         self._save_session()
         self._trace(
@@ -326,6 +368,8 @@ class Agent:
                 "parent_run_id": self.parent_run_id,
             },
         )
+        if memory_changed:
+            self._trace_working_memory("user")
         return run
 
     def _append_message(self, message: dict) -> None:
@@ -341,24 +385,66 @@ class Agent:
         )
 
     def _maybe_compress(self) -> bool:
-        before = estimate_tokens(self.messages)
-        changed = self.context.maybe_compress(self.messages, self.llm)
-        if not changed:
-            return False
-        after = estimate_tokens(self.messages)
+        return self._compress_context().changed
+
+    def _compress_context(self) -> CompressionResult:
+        result = self.context.maybe_compress(
+            self.messages,
+            self.llm,
+            self.session_state.working_memory,
+        )
+        if not result.changed:
+            return result
         metrics = self._run_metrics
+        event = {
+            "strategy": result.strategy,
+            "before_tokens": result.before_tokens,
+            "after_tokens": result.after_tokens,
+            "removed_messages": result.removed_messages,
+            "summarized_messages": result.summarized_messages,
+        }
         if metrics is not None:
             metrics.context_compressions += 1
             if metrics.context_compressions == 1:
-                metrics.context_tokens_before = before
-            metrics.context_tokens_after = after
+                metrics.context_tokens_before = result.before_tokens
+            metrics.context_tokens_after = result.after_tokens
+            metrics.context_compression_events.append(event)
         self._save_session()
-        self._trace(
-            "context_compressed",
-            {"before_tokens": before, "after_tokens": after},
-        )
+        self._trace("context_compressed", event)
         self._require_checkpoint(last_successful_action="context_compressed")
-        return True
+        return result
+
+    def compact_context(self) -> CompressionResult:
+        """Run manual compaction through the full durability lifecycle."""
+        run = self._start_run("/compact", update_working_memory=False)
+        try:
+            result = self._compress_context()
+            self._finish_run(
+                status="completed",
+                stop_reason="completed",
+                final_answer=(
+                    f"context compressed with {result.strategy}"
+                    if result.changed
+                    else "context did not require compression"
+                ),
+            )
+            return result
+        except KeyboardInterrupt:
+            if self.current_run is run:
+                self._finish_run(
+                    status="interrupted",
+                    stop_reason="user_interrupted",
+                    error="KeyboardInterrupt",
+                )
+            raise
+        except Exception as exc:
+            if self.current_run is run:
+                self._finish_run(
+                    status="failed",
+                    stop_reason="internal_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
 
     def _record_tool_result(self, tool_call, result) -> None:
         run = self.current_run
@@ -406,6 +492,14 @@ class Agent:
         if result.status == "rejected":
             self._trace("tool_rejected", event_data)
         self._trace("tool_completed", event_data)
+        if self.working_memory.apply(ToolMemoryEvent(
+            tool_name=tool_call.name,
+            arguments=dict(tool_call.arguments),
+            result=result,
+            run_id=run.run_id,
+            occurred_at=utc_now(),
+        )):
+            self._trace_working_memory("tool")
 
     def _finish_run(
         self,
@@ -428,6 +522,13 @@ class Agent:
         if status == "completed":
             self._last_successful_action = "run_completed"
         self._create_checkpoint(last_successful_action=self._last_successful_action)
+        if self.working_memory.apply(RunMemoryEvent(
+            status=status,
+            stop_reason=stop_reason,
+            run_id=run.run_id,
+            occurred_at=run.finished_at,
+        )):
+            self._trace_working_memory("run")
         self._trace(
             "run_finished" if status == "completed" else "run_failed",
             {"status": status, "stop_reason": stop_reason, "error": error},
@@ -457,6 +558,7 @@ class Agent:
             context_compressions=metrics.context_compressions,
             context_tokens_before=metrics.context_tokens_before,
             context_tokens_after=metrics.context_tokens_after,
+            context_compression_events=list(metrics.context_compression_events),
             checkpoint_status=self._checkpoint_status,
             recovery_status=(
                 self.recovery_result.status if self.recovery_result is not None else None
@@ -493,7 +595,12 @@ class Agent:
             workspace=self.workspace,
         )
         self.recovery_result = result
-        if apply_recovery(self.session_state, result):
+        session_changed = apply_recovery(self.session_state, result)
+        memory_changed = self.working_memory.apply(RecoveryMemoryEvent(
+            result=result,
+            occurred_at=utc_now(),
+        ))
+        if session_changed or memory_changed:
             self._save_session()
         return result
 
@@ -574,6 +681,15 @@ class Agent:
             return None
         if last_successful_action is not None:
             self._last_successful_action = last_successful_action
+        resolved_next_action = (
+            next_suggested_action
+            if next_suggested_action is not None
+            else (
+                "inspect workspace before deciding whether to retry pending tools"
+                if self._pending_tool_calls
+                else None
+            )
+        )
         checkpoint = Checkpoint(
             parent_checkpoint_id=self.session_state.last_checkpoint_id,
             session_id=self.session_state.session_id,
@@ -582,15 +698,7 @@ class Agent:
             completed_tool_call_ids=list(self._completed_tool_call_ids),
             pending_tool_calls=list(self._pending_tool_calls),
             last_successful_action=self._last_successful_action,
-            next_suggested_action=(
-                next_suggested_action
-                if next_suggested_action is not None
-                else (
-                    "inspect workspace before deciding whether to retry pending tools"
-                    if self._pending_tool_calls
-                    else None
-                )
-            ),
+            next_suggested_action=resolved_next_action,
             file_freshness=dict(sorted(self._file_freshness.items())),
             runtime_identity=self._runtime_identity(),
         )
@@ -602,6 +710,16 @@ class Agent:
         self.session_state.last_checkpoint_id = checkpoint.checkpoint_id
         if self._checkpoint_status != "error":
             self._checkpoint_status = "created"
+        if self.working_memory.apply(CheckpointMemoryEvent(
+            file_freshness=checkpoint.file_freshness,
+            pending_tool_names=[
+                str(call.get("name", "unknown"))
+                for call in checkpoint.pending_tool_calls
+            ],
+            next_suggested_action=checkpoint.next_suggested_action,
+            occurred_at=checkpoint.created_at,
+        )):
+            self._trace_working_memory("checkpoint")
         self._save_session()
         self._trace(
             "checkpoint_created",
@@ -637,6 +755,19 @@ class Agent:
         )
         self._safe_store("append trace", self.store.append_trace, trace_event)
 
+    def _trace_working_memory(self, source: str) -> None:
+        memory = self.session_state.working_memory
+        self._trace(
+            "working_memory_updated",
+            {
+                "source": source,
+                "file_count": len(memory.files),
+                "command_count": len(memory.recent_commands),
+                "blocker_count": len(memory.blockers),
+                "next_step_count": len(memory.next_steps),
+            },
+        )
+
     def _safe_store(self, action: str, operation, *args) -> bool:
         try:
             operation(*args)
@@ -649,6 +780,17 @@ class Agent:
             return False
 
     def reset(self):
-        """Clear conversation history."""
+        """Clear conversation, Working Memory, and recovery continuity."""
         self.messages.clear()
+        self.session_state.working_memory = WorkingMemory()
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
+        self.session_state.last_checkpoint_id = None
+        self._file_freshness.clear()
+        self._completed_tool_call_ids.clear()
+        self._pending_tool_calls.clear()
+        self._last_successful_action = None
+        self.recovery_result = None
         self._save_session()

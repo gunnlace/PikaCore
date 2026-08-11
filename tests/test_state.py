@@ -10,6 +10,7 @@ from pikacore.state import (
     SchemaMismatchError,
     SessionState,
     TraceEvent,
+    WorkingMemory,
 )
 
 
@@ -40,8 +41,16 @@ def test_state_models_fail_closed_on_unknown_schema(state_type):
     assert exc_info.value.error_code == "schema-mismatch"
 
 
-def test_session_state_reserves_future_phase_fields_without_implementing_them():
+def test_session_state_uses_structured_working_memory_and_upgrades_placeholder():
     state = SessionState()
 
-    assert state.working_memory == {}
+    assert isinstance(state.working_memory, WorkingMemory)
+    assert state.working_memory.files == []
     assert state.last_checkpoint_id is None
+
+    data = state.to_dict()
+    data["working_memory"] = {}
+    restored = SessionState.from_dict(data)
+
+    assert restored.working_memory.current_request == ""
+    assert restored.working_memory.files == []
