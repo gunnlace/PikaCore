@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from .llm import LLM
     from .state import WorkingMemory
 
+_SUMMARY_INPUT_LIMIT = 15_000
+_SUMMARY_MEMORY_LIMIT = 3_500
+_SUMMARY_TURNS_LIMIT = 11_000
+
 
 @dataclass(frozen=True)
 class CompressionResult:
@@ -316,7 +320,7 @@ class ContextManager:
                         },
                         {
                             "role": "user",
-                            "content": f"{memory_text}\n\n{flat}"[:15000],
+                            "content": self._summary_input(flat, memory_text),
                         },
                     ],
                 )
@@ -334,8 +338,68 @@ class ContextManager:
             role = message.get("role", "?")
             text = str(message.get("content", "") or "")
             if text:
-                parts.append(f"[{role}] {text[:400]}")
+                parts.append(f"[{role}] {ContextManager._message_excerpt(text)}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _message_excerpt(text: str, limit: int = 400) -> str:
+        if len(text) <= limit:
+            return text
+        key_snippets = [
+            match.group().strip()
+            for match in re.finditer(
+                r".{0,80}(?:decision|error|failed|failure|recovery|blocker).{0,160}",
+                text,
+                flags=re.IGNORECASE,
+            )
+        ]
+        if key_snippets:
+            keys = " ... ".join(key_snippets)
+            head_size = max(0, limit - len(keys) - 20)
+            return f"{text[:head_size]} ... [key] {keys}"[:limit]
+        head_size = limit // 2
+        tail_size = limit - head_size - 18
+        return f"{text[:head_size]} ... [truncated] ... {text[-tail_size:]}"[:limit]
+
+    @staticmethod
+    def _summary_input(flat_turns: str, memory_text: str) -> str:
+        turns = ContextManager._bounded_text(
+            flat_turns,
+            _SUMMARY_TURNS_LIMIT,
+            preserve_key_lines=True,
+        )
+        memory = ContextManager._bounded_text(
+            memory_text,
+            _SUMMARY_MEMORY_LIMIT,
+            preserve_key_lines=False,
+        )
+        prompt = (
+            f"[Prior structured turns]\n{turns}\n\n"
+            f"[Working Memory reference]\n{memory}"
+        )
+        return prompt[:_SUMMARY_INPUT_LIMIT]
+
+    @staticmethod
+    def _bounded_text(text: str, limit: int, *, preserve_key_lines: bool) -> str:
+        if len(text) <= limit:
+            return text
+        marker = "\n... [section truncated] ...\n"
+        key_text = ""
+        if preserve_key_lines:
+            key_lines = [
+                line for line in text.splitlines()
+                if any(token in line.lower() for token in (
+                    "decision", "error", "failed", "failure", "recovery", "blocker"
+                ))
+            ]
+            if key_lines:
+                key_text = "\n[Preserved key lines]\n" + "\n".join(key_lines)
+                key_text = key_text[: min(3_000, limit // 3)]
+        remaining = max(0, limit - len(marker) - len(key_text))
+        head_size = remaining // 2
+        tail_size = remaining - head_size
+        tail = text[-tail_size:] if tail_size else ""
+        return f"{text[:head_size]}{marker}{key_text}{tail}"[:limit]
 
     @staticmethod
     def _extract_key_info(

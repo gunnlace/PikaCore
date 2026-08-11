@@ -239,11 +239,7 @@ def _repl(agent: Agent, config: Config):
                 console.print(f"Current model: [cyan]{config.model}[/cyan]")
             continue
         if user_input == "/compact":
-            result = agent.context.maybe_compress(
-                agent.messages,
-                agent.llm,
-                agent.session_state.working_memory,
-            )
+            result = agent.compact_context()
             if result.changed:
                 console.print(
                     f"[green]Compressed ({result.strategy}): "
@@ -311,7 +307,7 @@ def _show_help():
     console.print(Panel(
         "[bold]Commands:[/bold]\n"
         "  /help          Show this help\n"
-        "  /reset         Clear conversation history\n"
+        "  /reset         Clear conversation and Working Memory\n"
         "  /model         Show current model\n"
         "  /model <name>  Switch model mid-conversation\n"
         "  /tokens        Show token usage\n"

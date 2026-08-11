@@ -29,7 +29,7 @@ from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
 from .prompt import system_prompt
-from .context import ContextManager, estimate_tokens
+from .context import CompressionResult, ContextManager, estimate_tokens
 from .permissions import PermissionPolicy
 from .state import (
     Checkpoint,
@@ -328,7 +328,12 @@ class Agent:
                     call for call in self._pending_tool_calls if call.get("id") != tc.id
                 ]
 
-    def _start_run(self, user_input: str) -> RunState:
+    def _start_run(
+        self,
+        user_input: str,
+        *,
+        update_working_memory: bool = True,
+    ) -> RunState:
         if self.current_run is not None:
             raise RuntimeError("Agent already has an active run")
         run = RunState(
@@ -346,11 +351,13 @@ class Agent:
         )
         self.session_state.run_ids.append(run.run_id)
         self.session_state.touch()
-        memory_changed = self.working_memory.apply(UserMemoryEvent(
-            request=user_input,
-            run_id=run.run_id,
-            occurred_at=utc_now(),
-        ))
+        memory_changed = False
+        if update_working_memory:
+            memory_changed = self.working_memory.apply(UserMemoryEvent(
+                request=user_input,
+                run_id=run.run_id,
+                occurred_at=utc_now(),
+            ))
         self._save_run()
         self._save_session()
         self._trace(
@@ -378,13 +385,16 @@ class Agent:
         )
 
     def _maybe_compress(self) -> bool:
+        return self._compress_context().changed
+
+    def _compress_context(self) -> CompressionResult:
         result = self.context.maybe_compress(
             self.messages,
             self.llm,
             self.session_state.working_memory,
         )
         if not result.changed:
-            return False
+            return result
         metrics = self._run_metrics
         event = {
             "strategy": result.strategy,
@@ -402,7 +412,39 @@ class Agent:
         self._save_session()
         self._trace("context_compressed", event)
         self._require_checkpoint(last_successful_action="context_compressed")
-        return True
+        return result
+
+    def compact_context(self) -> CompressionResult:
+        """Run manual compaction through the full durability lifecycle."""
+        run = self._start_run("/compact", update_working_memory=False)
+        try:
+            result = self._compress_context()
+            self._finish_run(
+                status="completed",
+                stop_reason="completed",
+                final_answer=(
+                    f"context compressed with {result.strategy}"
+                    if result.changed
+                    else "context did not require compression"
+                ),
+            )
+            return result
+        except KeyboardInterrupt:
+            if self.current_run is run:
+                self._finish_run(
+                    status="interrupted",
+                    stop_reason="user_interrupted",
+                    error="KeyboardInterrupt",
+                )
+            raise
+        except Exception as exc:
+            if self.current_run is run:
+                self._finish_run(
+                    status="failed",
+                    stop_reason="internal_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
 
     def _record_tool_result(self, tool_call, result) -> None:
         run = self.current_run

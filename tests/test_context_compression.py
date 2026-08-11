@@ -223,3 +223,42 @@ def test_working_memory_is_counted_but_not_rewritten_by_compression():
 
     assert result.before_tokens > estimate_tokens(messages)
     assert memory == before
+
+
+def test_summary_input_reserves_old_turn_budget_when_working_memory_is_full():
+    memory = WorkingMemory(
+        task_summary="large task",
+        files=[
+            FileMemory(
+                f"file-{index}.py",
+                "read",
+                f"summary-{index} " + "m" * 580,
+                f"hash-{index}",
+                True,
+            )
+            for index in range(30)
+        ],
+    )
+    messages = []
+    for index in range(14):
+        content = f"turn {index} " + "x" * 500
+        if index == 5:
+            content += " DECISION-XYZ"
+        if index == 4:
+            content += " ERROR-XYZ"
+        messages.append({"role": "user", "content": content})
+    llm = FakeLLM([LLMResponse(content="summary")])
+
+    result = ContextManager(max_tokens=4000).maybe_compress(
+        messages,
+        llm,
+        memory,
+    )
+    summary_input = llm.calls[0][1]["content"]
+
+    assert result.changed
+    assert "DECISION-XYZ" in summary_input
+    assert "ERROR-XYZ" in summary_input
+    assert "[Prior structured turns]" in summary_input
+    assert "[Working Memory reference]" in summary_input
+    assert len(summary_input) <= 15_000

@@ -285,6 +285,45 @@ def test_every_context_compression_is_recorded_in_trace_and_report(tmp_path):
     assert all(event["after_tokens"] < event["before_tokens"] for event in trace_events)
 
 
+def test_manual_compact_uses_agent_durability_and_observability_path(tmp_path):
+    store = ProjectStore(state_root=tmp_path / "state")
+    agent = Agent(
+        llm=FakeLLM([]),
+        tools=[LongOutputTool()],
+        max_context_tokens=100,
+        workspace=WorkspaceContext(tmp_path),
+        store=store,
+    )
+    agent.session_state.working_memory.current_request = "original task"
+    agent.session_state.working_memory.task_summary = "original task"
+    agent.messages = [
+        {"role": "user", "content": "run long output"},
+        _tool_response(ToolCall("long", "long_output", {})).message,
+        {
+            "role": "tool",
+            "tool_call_id": "long",
+            "content": LongOutputTool().execute(),
+        },
+    ]
+
+    result = agent.compact_context()
+    run_id = agent.session_state.run_ids[-1]
+    persisted = store.load_session(agent.session_state.session_id)
+    report = store.load_report(run_id)
+    trace_events = store.read_trace(run_id).events
+
+    assert result.changed
+    assert persisted is not None
+    assert persisted.messages == agent.messages
+    assert "[Tool output compressed]" in persisted.messages[-1]["content"]
+    assert persisted.working_memory.current_request == "original task"
+    assert report is not None
+    assert report.context_compression_events[0]["strategy"] == result.strategy
+    assert any(event.event == "context_compressed" for event in trace_events)
+    assert report.checkpoint_status == "created"
+    assert persisted.last_checkpoint_id is not None
+
+
 def test_model_failure_persists_failed_run_report_and_user_message(tmp_path):
     store = ProjectStore(state_root=tmp_path / "state")
     agent = Agent(
