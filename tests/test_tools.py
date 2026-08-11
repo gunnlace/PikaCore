@@ -1,10 +1,19 @@
 """Tests for the tool system."""
 
 import os
+import shlex
+import subprocess
 import sys
+from pathlib import Path
 
 from pikacore.tools import ALL_TOOLS, get_tool
 from pikacore.workspace import WorkspaceContext
+
+
+def _python_command(source: str) -> str:
+    """Quote a Python one-liner for the platform shell used by shell=True."""
+    arguments = [sys.executable, "-c", source]
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
 def _workspace_tool(name, root):
@@ -145,8 +154,9 @@ def test_bash_cwd_is_isolated_between_tool_instances(tmp_path):
 
     bash_a.execute(command="cd sub")
 
-    assert bash_a.execute(command="pwd") == str(repo_a / "sub")
-    assert bash_b.execute(command="pwd") == str(repo_b)
+    cwd_command = _python_command("import os; print(os.getcwd())")
+    assert Path(bash_a.execute(command=cwd_command)).resolve() == (repo_a / "sub").resolve()
+    assert Path(bash_b.execute(command=cwd_command)).resolve() == repo_b.resolve()
 
 
 def test_bash_truncates_long_output():

@@ -14,6 +14,18 @@ _ALLOWED_ENV_NAMES = {
     "TMPDIR",
     "VIRTUAL_ENV",
     "PYTHONPATH",
+    # Windows CreateProcess/cmd.exe and common child runtimes depend on these.
+    "COMSPEC",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "USERNAME",
+    "HOMEDRIVE",
+    "HOMEPATH",
 }
 _SECRET_NAME_RE = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL", re.IGNORECASE)
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+")

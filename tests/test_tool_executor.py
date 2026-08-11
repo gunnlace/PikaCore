@@ -1,6 +1,9 @@
 """Structured execution, approval threading, and read/write barrier tests."""
 
+import os
+import shlex
 import subprocess
+import sys
 import threading
 
 import pytest
@@ -12,6 +15,12 @@ from pikacore.tools.base import Tool
 from pikacore.tools.bash import BashTool
 from pikacore.tools.write import WriteFileTool
 from pikacore.workspace import WorkspaceContext
+
+
+def _python_command(source: str) -> str:
+    """Quote a Python one-liner for the platform shell used by shell=True."""
+    arguments = [sys.executable, "-c", source]
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
 class MutatingTool(Tool):
@@ -360,7 +369,15 @@ def test_bash_and_agent_mutations_are_detected_without_path_arguments(tmp_path):
     )
 
     bash_result = executor.execute_one(
-        ToolCall("bash", "bash", {"command": "printf bash > changed-by-bash.txt"})
+        ToolCall(
+            "bash",
+            "bash",
+            {
+                "command": _python_command(
+                    "from pathlib import Path; Path('changed-by-bash.txt').write_text('bash')"
+                )
+            },
+        )
     )
     agent_result = executor.execute_one(
         ToolCall("agent", "agent", {"filename": "changed-by-agent.txt"})
@@ -400,10 +417,26 @@ def test_workspace_delta_does_not_attribute_preexisting_dirty_files(tmp_path):
     )
 
     result = executor.execute_one(
-        ToolCall("bash", "bash", {"command": "printf tool > created.txt"})
+        ToolCall(
+            "bash",
+            "bash",
+            {
+                "command": _python_command(
+                    "from pathlib import Path; Path('created.txt').write_text('tool')"
+                )
+            },
+        )
     )
     dirty_result = executor.execute_one(
-        ToolCall("bash-2", "bash", {"command": "printf newer > unrelated.txt"})
+        ToolCall(
+            "bash-2",
+            "bash",
+            {
+                "command": _python_command(
+                    "from pathlib import Path; Path('unrelated.txt').write_text('newer')"
+                )
+            },
+        )
     )
 
     assert result.workspace_changed is True
@@ -420,7 +453,15 @@ def test_non_git_bash_and_agent_mutations_are_conservatively_visible(tmp_path):
     )
 
     bash_result = executor.execute_one(
-        ToolCall("bash", "bash", {"command": "printf bash > changed-by-bash.txt"})
+        ToolCall(
+            "bash",
+            "bash",
+            {
+                "command": _python_command(
+                    "from pathlib import Path; Path('changed-by-bash.txt').write_text('bash')"
+                )
+            },
+        )
     )
     agent_result = executor.execute_one(
         ToolCall("agent", "agent", {"filename": "changed-by-agent.txt"})
@@ -441,7 +482,12 @@ def test_non_git_nonzero_bash_reports_possible_partial_side_effects(tmp_path):
         ToolCall(
             "bash",
             "bash",
-            {"command": "printf partial > touched.txt; exit 7"},
+            {
+                "command": _python_command(
+                    "from pathlib import Path; "
+                    "Path('touched.txt').write_text('partial'); raise SystemExit(7)"
+                )
+            },
         )
     )
 

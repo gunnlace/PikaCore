@@ -56,6 +56,11 @@ def test_sanitize_environment_uses_allowlist_and_removes_secrets():
         "HOME": "/home/user",
         "LC_ALL": "C.UTF-8",
         "PYTHONPATH": "/project",
+        "ComSpec": r"C:\Windows\System32\cmd.exe",
+        "SystemRoot": r"C:\Windows",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "TEMP": r"C:\Temp",
+        "USERPROFILE": r"C:\Users\runner",
         "OPENAI_API_KEY": "openai-secret",
         "PIKACORE_TOKEN": "pikacore-secret",
         "DATABASE_PASSWORD": "db-secret",
@@ -67,6 +72,11 @@ def test_sanitize_environment_uses_allowlist_and_removes_secrets():
         "HOME": "/home/user",
         "LC_ALL": "C.UTF-8",
         "PYTHONPATH": "/project",
+        "ComSpec": r"C:\Windows\System32\cmd.exe",
+        "SystemRoot": r"C:\Windows",
+        "PATHEXT": ".COM;.EXE;.BAT;.CMD",
+        "TEMP": r"C:\Temp",
+        "USERPROFILE": r"C:\Users\runner",
     }
 
 
