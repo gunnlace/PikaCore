@@ -184,8 +184,8 @@ def test_session_save_load(tmp_path, monkeypatch):
     save_session(msgs, "test-model", "pytest_test_session")
     loaded = load_session("pytest_test_session")
     assert loaded is not None
-    assert loaded[0] == msgs
-    assert loaded[1] == "test-model"
+    assert loaded.messages == msgs
+    assert loaded.model == "test-model"
 
 
 def test_session_name_is_sanitized(tmp_path, monkeypatch):

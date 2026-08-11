@@ -16,6 +16,7 @@ from .llm import LLM, LiteLLM
 from .config import Config
 from .session import save_session, load_session, list_sessions
 from .permissions import PermissionPolicy
+from .state import SchemaMismatchError
 from . import __version__
 
 console = Console()
@@ -69,6 +70,19 @@ def main():
     if args.api_key:
         config.api_key = args.api_key
 
+    resumed_state = None
+    if args.resume:
+        try:
+            resumed_state = load_session(args.resume)
+        except SchemaMismatchError as exc:
+            console.print(f"[red]Cannot resume session '{args.resume}': {exc.error_code}.[/red]")
+            sys.exit(1)
+        if resumed_state is None:
+            console.print(f"[red]Session '{args.resume}' not found.[/red]")
+            sys.exit(1)
+        if not args.model:
+            config.model = resumed_state.model
+
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
         console.print(
@@ -99,21 +113,11 @@ def main():
         max_context_tokens=config.max_context_tokens,
         permission_policy=PermissionPolicy(args.permissions),
         approval_callback=_approve_tool,
+        session_state=resumed_state,
     )
 
-    # resume saved session
-    if args.resume:
-        loaded = load_session(args.resume)
-        if loaded:
-            agent.messages, loaded_model = loaded
-            # restore the model from the saved session unless overridden by CLI
-            if not args.model:
-                agent.llm.model = loaded_model
-                config.model = loaded_model
-            console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
-        else:
-            console.print(f"[red]Session '{args.resume}' not found.[/red]")
-            sys.exit(1)
+    if resumed_state is not None:
+        console.print(f"[green]Resumed session: {args.resume} (model: {agent.llm.model})[/green]")
 
     # one-shot mode
     if args.prompt:
