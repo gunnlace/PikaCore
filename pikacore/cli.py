@@ -12,9 +12,10 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 
 from .agent import Agent
+from .commands import execute_command
 from .llm import LLM, LiteLLM
 from .config import Config
-from .session import save_session, load_session, list_sessions
+from .session import load_session
 from .permissions import PermissionPolicy
 from .state import SchemaMismatchError
 from . import __version__
@@ -170,6 +171,15 @@ def _approve_tool(tool, arguments: dict) -> bool:
         return False
 
 
+def _confirm_command(message: str) -> bool:
+    """Request confirmation for a command; command parsing stays input-free."""
+    console.print(message, style="yellow", markup=False)
+    try:
+        return input("Confirm? [y/N] ").strip().lower() in {"y", "yes"}
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
 def _repl(agent: Agent, config: Config):
     """Interactive read-eval-print loop."""
     console.print(Panel(
@@ -210,74 +220,17 @@ def _repl(agent: Agent, config: Config):
         if not user_input:
             continue
 
-        # built-in commands
-        if user_input.lower() in ("quit", "exit", "/quit", "/exit"):
-            break
-        if user_input == "/help":
-            _show_help()
-            continue
-        if user_input == "/reset":
-            agent.reset()
-            console.print("[yellow]Conversation and Working Memory reset.[/yellow]")
-            continue
-        if user_input == "/tokens":
-            p = agent.llm.total_prompt_tokens
-            c = agent.llm.total_completion_tokens
-            line = f"Tokens: [cyan]{p}[/cyan] prompt + [cyan]{c}[/cyan] completion = [bold]{p+c}[/bold] total"
-            cost = agent.llm.estimated_cost
-            if cost is not None:
-                line += f"  (~${cost:.4f})"
-            console.print(line)
-            continue
-        if user_input == "/model" or user_input.startswith("/model "):
-            new_model = user_input[7:].strip() if user_input.startswith("/model ") else ""
-            if new_model:
-                agent.llm.model = new_model
-                config.model = new_model
-                console.print(f"Switched to [cyan]{new_model}[/cyan]")
-            else:
-                console.print(f"Current model: [cyan]{config.model}[/cyan]")
-            continue
-        if user_input == "/compact":
-            result = agent.compact_context()
-            if result.changed:
-                console.print(
-                    f"[green]Compressed ({result.strategy}): "
-                    f"{result.before_tokens} → {result.after_tokens} tokens "
-                    f"({len(agent.messages)} messages)[/green]"
-                )
-            else:
-                console.print(
-                    f"[dim]Nothing to compress ({result.before_tokens} tokens, "
-                    f"{len(agent.messages)} messages)[/dim]"
-                )
-            continue
-        if user_input == "/save":
-            sid = save_session(agent.messages, config.model)
-            console.print(f"[green]Session saved: {sid}[/green]")
-            console.print(f"Resume with: pikacore -r {sid}")
-            continue
-        if user_input == "/diff":
-            from .tools.edit import _changed_files
-            if not _changed_files:
-                console.print("[dim]No files modified this session.[/dim]")
-            else:
-                console.print(f"[bold]Files modified this session ({len(_changed_files)}):[/bold]")
-                for f in sorted(_changed_files):
-                    console.print(f"  [cyan]{f}[/cyan]")
-            continue
-        if user_input == "/sessions":
-            sessions = list_sessions()
-            if not sessions:
-                console.print("[dim]No saved sessions.[/dim]")
-            else:
-                for s in sessions:
-                    console.print(f"  [cyan]{s['id']}[/cyan] ({s['model']}, {s['saved_at']}) {s['preview']}")
-            continue
-
-        # an unknown /command shouldn't be sent to the model as a prompt
-        if user_input.startswith("/"):
-            console.print(f"[yellow]Unknown command: {user_input.split()[0]} (try /help)[/yellow]")
+        command = execute_command(
+            user_input,
+            agent=agent,
+            config=config,
+            confirm=_confirm_command,
+        )
+        if command.handled:
+            if command.exit_requested:
+                break
+            for line in command.lines:
+                console.print(line, markup=False)
             continue
 
         # call the agent
@@ -301,30 +254,6 @@ def _repl(agent: Agent, config: Config):
             console.print("\n[yellow]Interrupted.[/yellow]")
         except Exception as e:
             console.print(f"\n[red]Error: {e}[/red]")
-
-
-def _show_help():
-    console.print(Panel(
-        "[bold]Commands:[/bold]\n"
-        "  /help          Show this help\n"
-        "  /reset         Clear conversation and Working Memory\n"
-        "  /model         Show current model\n"
-        "  /model <name>  Switch model mid-conversation\n"
-        "  /tokens        Show token usage\n"
-        "  /compact       Compress conversation context\n"
-        "  /diff          Show files modified this session\n"
-        "  /save          Save session to disk\n"
-        "  /sessions      List saved sessions\n"
-        "  quit           Exit PikaCore\n"
-        "\n"
-        "[bold]Input:[/bold]\n"
-        "  Enter          Submit message\n"
-        "  Esc+Enter      Insert newline (for pasting code)",
-        title="PikaCore Help",
-        border_style="dim",
-    ))
-
-
 def _brief(kwargs: dict, maxlen: int = 80) -> str:
     s = ", ".join(f"{k}={repr(v)[:40]}" for k, v in kwargs.items())
     return s[:maxlen] + ("..." if len(s) > maxlen else "")
