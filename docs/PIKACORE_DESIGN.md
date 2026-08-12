@@ -1,5 +1,10 @@
 # PikaCore current architecture
 
+[English](PIKACORE_DESIGN.md) | [简体中文](PIKACORE_DESIGN_CN.md)
+
+The English documentation is canonical. Functional documentation changes must update
+the English and Simplified Chinese versions in the same pull request.
+
 This document describes the behavior implemented in PikaCore 0.1.0. It is an
 implementation reference, not a roadmap.
 
