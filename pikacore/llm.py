@@ -81,6 +81,22 @@ _PRICING = {
 }
 
 
+def estimate_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> float | None:
+    """Estimate USD cost for one model's token totals when pricing is known."""
+    pricing = _PRICING.get(model)
+    if not pricing:
+        return None
+    input_rate, output_rate = pricing
+    return (
+        prompt_tokens * input_rate / 1_000_000
+        + completion_tokens * output_rate / 1_000_000
+    )
+
+
 class LLM:
     def __init__(
         self,
@@ -98,13 +114,10 @@ class LLM:
     @property
     def estimated_cost(self) -> float | None:
         """Rough cost estimate in USD. Returns None if model not in pricing table."""
-        pricing = _PRICING.get(self.model)
-        if not pricing:
-            return None
-        input_rate, output_rate = pricing
-        return (
-            self.total_prompt_tokens * input_rate / 1_000_000
-            + self.total_completion_tokens * output_rate / 1_000_000
+        return estimate_cost(
+            self.model,
+            self.total_prompt_tokens,
+            self.total_completion_tokens,
         )
 
     def chat(

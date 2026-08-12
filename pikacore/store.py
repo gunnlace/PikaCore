@@ -6,12 +6,21 @@ import json
 import os
 import re
 import tempfile
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .security import redact
-from .state import Checkpoint, Report, RunState, SessionState, TraceEvent
+from .state import (
+    Checkpoint,
+    Report,
+    RunState,
+    SessionState,
+    TraceEvent,
+    new_id,
+    utc_now,
+)
 
 _SAFE_COMPONENT_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -122,6 +131,32 @@ class ProjectStore:
             return None
         return SessionState.from_dict(read_json(path))
 
+    def save_session_snapshot(
+        self,
+        state: SessionState,
+        name: str | None = None,
+    ) -> SessionState:
+        """Save a complete session branch, including a valid checkpoint link."""
+        snapshot = deepcopy(state)
+        snapshot.session_id = _snapshot_id(name)
+        timestamp = utc_now()
+        snapshot.created_at = timestamp
+        snapshot.updated_at = timestamp
+
+        if snapshot.last_checkpoint_id is not None:
+            checkpoint = self.load_checkpoint(snapshot.last_checkpoint_id)
+            if checkpoint is not None:
+                checkpoint = deepcopy(checkpoint)
+                checkpoint.parent_checkpoint_id = checkpoint.checkpoint_id
+                checkpoint.checkpoint_id = new_id("checkpoint")
+                checkpoint.session_id = snapshot.session_id
+                checkpoint.created_at = timestamp
+                self.save_checkpoint(checkpoint)
+                snapshot.last_checkpoint_id = checkpoint.checkpoint_id
+
+        self.save_session(snapshot)
+        return snapshot
+
     def save_run(self, state: RunState) -> None:
         atomic_write_json(
             self.task_state_path(state.run_id),
@@ -190,3 +225,12 @@ def _safe_component(value: str) -> str:
     if not value or not _SAFE_COMPONENT_RE.fullmatch(value) or value in {".", ".."}:
         raise ValueError("Invalid state identifier")
     return value
+
+
+def _snapshot_id(name: str | None) -> str:
+    if not name:
+        return new_id("session")
+    normalized = name.strip().replace("\\", "/").split("/")[-1]
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", normalized).strip(".-_")
+    normalized = normalized[:100].strip(".-_")
+    return normalized or new_id("session")

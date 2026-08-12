@@ -24,7 +24,7 @@ from .checkpoint import (
     schema_mismatch_result,
     serialize_tool_call,
 )
-from .llm import LLM, ToolCall
+from .llm import LLM, ToolCall, estimate_cost
 from .tools import create_tools
 from .tools.base import Tool
 from .tools.agent import AgentTool
@@ -111,13 +111,7 @@ class Agent:
             repo_root=str(self.workspace.repo_root),
             model=model,
         )
-        self.session_state.working_memory = WorkingMemory.from_dict(
-            self.session_state.working_memory
-        )
-        self.working_memory = WorkingMemoryManager(
-            self.session_state.working_memory,
-            self.workspace,
-        )
+        self._bind_session_state(self.session_state)
         self.store = store if store is not None else (
             ProjectStore(repo_root=self.workspace.repo_root) if persist else None
         )
@@ -128,6 +122,7 @@ class Agent:
         self._completed_tool_call_ids: list[str] = []
         self._pending_tool_calls: list[dict] = []
         self._file_freshness: dict[str, str] = {}
+        self._session_affected_paths: dict[str, set[str]] = {}
         self._last_successful_action: str | None = None
         self._checkpoint_status: str | None = None
         self.recovery_result: RecoveryResult | None = None
@@ -146,6 +141,14 @@ class Agent:
         if rendered_memory:
             full.append({"role": "system", "content": rendered_memory})
         return full + self.messages
+
+    def _bind_session_state(self, state: SessionState) -> None:
+        state.working_memory = WorkingMemory.from_dict(state.working_memory)
+        self.session_state = state
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
 
     def _tool_schemas(self) -> list[dict]:
         return [t.schema() for t in self.tools]
@@ -461,6 +464,10 @@ class Agent:
             metrics.tool_approvals[tool_call.name] += 1
         metrics.read_paths.update(result.read_paths)
         metrics.affected_paths.update(result.affected_paths)
+        self._session_affected_paths.setdefault(
+            self.session_state.session_id,
+            set(),
+        ).update(result.affected_paths)
         if tool_call.id not in self._completed_tool_call_ids:
             self._completed_tool_call_ids.append(tool_call.id)
         self._pending_tool_calls = [
@@ -508,6 +515,7 @@ class Agent:
         stop_reason: str,
         final_answer: str | None = None,
         error: str | None = None,
+        trace_data: dict | None = None,
     ) -> None:
         run = self.current_run
         metrics = self._run_metrics
@@ -529,9 +537,16 @@ class Agent:
             occurred_at=run.finished_at,
         )):
             self._trace_working_memory("run")
+        finished_data = {
+            "status": status,
+            "stop_reason": stop_reason,
+            "error": error,
+        }
+        if trace_data:
+            finished_data.update(trace_data)
         self._trace(
             "run_finished" if status == "completed" else "run_failed",
-            {"status": status, "stop_reason": stop_reason, "error": error},
+            finished_data,
         )
         # Complete the Session durability point before freezing report metrics so
         # a recoverable final-session failure is represented in the report.
@@ -794,3 +809,191 @@ class Agent:
         self._last_successful_action = None
         self.recovery_result = None
         self._save_session()
+
+    def clear_working_memory(self) -> WorkingMemory:
+        """Clear Working Memory without changing structured message history."""
+        self.session_state.working_memory = WorkingMemory()
+        self.working_memory = WorkingMemoryManager(
+            self.session_state.working_memory,
+            self.workspace,
+        )
+        self._save_session()
+        return self.session_state.working_memory
+
+    def new_session(self) -> SessionState:
+        """Persist the current session and activate a new empty session."""
+        if self.current_run is not None:
+            raise RuntimeError("Cannot switch sessions during an active run")
+        self._save_session()
+        state = SessionState(
+            repo_root=str(self.workspace.repo_root),
+            model=getattr(self.llm, "model", "unknown"),
+        )
+        self._bind_session_state(state)
+        self._clear_session_runtime()
+        self._save_session()
+        return state
+
+    def resume_session(self, session_id: str) -> RecoveryResult | None:
+        """Load, validate, and activate a stored session without replaying tools."""
+        if self.current_run is not None:
+            raise RuntimeError("Cannot switch sessions during an active run")
+        if self.store is None:
+            return None
+        state = self.store.load_session(session_id)
+        if state is None:
+            return None
+
+        previous_state = self.session_state
+        previous_model = getattr(self.llm, "model", "unknown")
+        self._save_session()
+        self._bind_session_state(state)
+        self.llm.model = state.model
+        self._clear_session_runtime()
+        result = self.recover_session()
+        if not result.can_resume:
+            self._bind_session_state(previous_state)
+            self.llm.model = previous_model
+            self._clear_session_runtime()
+        return result
+
+    def set_model(self, model: str) -> str:
+        """Switch model and checkpoint the resulting runtime identity."""
+        model = model.strip()
+        if not model:
+            raise ValueError("Model name cannot be empty")
+        run = self._start_run(f"/model {model}", update_working_memory=False)
+        previous = getattr(self.llm, "model", "unknown")
+        try:
+            self.llm.model = model
+            self.session_state.model = model
+            self._finish_run(
+                status="completed",
+                stop_reason="completed",
+                final_answer=f"model changed to {model}",
+                trace_data={"previous_model": previous, "model": model},
+            )
+        except Exception as exc:
+            if self.current_run is run:
+                self._finish_run(
+                    status="failed",
+                    stop_reason="internal_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        return model
+
+    def set_permission_mode(self, mode: str) -> PermissionPolicy:
+        """Change process permissions and record the change in trace/checkpoint."""
+        policy = PermissionPolicy(mode)
+        run = self._start_run(f"/permissions {mode}", update_working_memory=False)
+        previous = self.permission_policy.mode
+        try:
+            self.permission_policy = policy
+            self.tool_executor.permission_policy = policy
+            self._finish_run(
+                status="completed",
+                stop_reason="completed",
+                final_answer=f"permissions changed to {policy.mode}",
+                trace_data={
+                    "previous_permission_mode": previous,
+                    "permission_mode": policy.mode,
+                },
+            )
+        except Exception as exc:
+            if self.current_run is run:
+                self._finish_run(
+                    status="failed",
+                    stop_reason="internal_error",
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+            raise
+        return policy
+
+    def recent_runs(self, limit: int = 10) -> list[RunState]:
+        if self.store is None:
+            return []
+        runs = []
+        for run_id in reversed(self.session_state.run_ids[-limit:]):
+            state = self.store.load_run(run_id)
+            if state is not None:
+                runs.append(state)
+        return runs
+
+    def recent_trace(
+        self,
+        run_id: str | None = None,
+        limit: int = 20,
+    ) -> tuple[list[TraceEvent], list[str]]:
+        if self.store is None:
+            return [], []
+        selected = run_id or (
+            self.session_state.run_ids[-1] if self.session_state.run_ids else None
+        )
+        if selected is None:
+            return [], []
+        result = self.store.read_trace(selected)
+        return result.events[-limit:], result.warnings
+
+    def session_token_usage(self) -> tuple[int, int, float | None]:
+        """Aggregate exclusive token usage across reports in this session."""
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_cost = 0.0
+        cost_known = True
+        if self.store is None:
+            return prompt_tokens, completion_tokens, None
+        for run_id in self.session_state.run_ids:
+            report = self.store.load_report(run_id)
+            if report is None:
+                continue
+            prompt_tokens += report.prompt_tokens
+            completion_tokens += report.completion_tokens
+            run_cost = estimate_cost(
+                report.model,
+                report.prompt_tokens,
+                report.completion_tokens,
+            )
+            if not report.prompt_tokens and not report.completion_tokens:
+                continue
+            if run_cost is None:
+                cost_known = False
+            else:
+                total_cost += run_cost
+        return (
+            prompt_tokens,
+            completion_tokens,
+            total_cost if cost_known else None,
+        )
+
+    def modified_paths(self) -> list[str]:
+        paths = set(
+            self._session_affected_paths.get(self.session_state.session_id, set())
+        )
+        if self.store is not None:
+            for run_id in self.session_state.run_ids:
+                report = self.store.load_report(run_id)
+                if report is not None:
+                    paths.update(report.affected_paths)
+        return sorted(paths)
+
+    def save_session_snapshot(self, name: str | None = None) -> str:
+        """Persist a complete named copy of the current durable session."""
+        if self.current_run is not None:
+            raise RuntimeError("Cannot snapshot a session during an active run")
+        if self.store is None:
+            raise RuntimeError("Session persistence is disabled")
+        self._save_session()
+        snapshot = self.store.save_session_snapshot(self.session_state, name)
+        return snapshot.session_id
+
+    def _clear_session_runtime(self) -> None:
+        self.current_run = None
+        self._run_metrics = None
+        self._trace_seq = 0
+        self._completed_tool_call_ids = []
+        self._pending_tool_calls = []
+        self._file_freshness = {}
+        self._last_successful_action = None
+        self._checkpoint_status = None
+        self.recovery_result = None
