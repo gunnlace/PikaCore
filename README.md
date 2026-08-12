@@ -1,5 +1,10 @@
 # PikaCore
 
+[English](README.md) | [简体中文](README_CN.md)
+
+The English documentation is canonical. Functional documentation changes must update
+the English and Simplified Chinese versions in the same pull request.
+
 PikaCore is a small coding-agent harness with native function calling, project-local
 state, resumable runs, permission controls, Working Memory, context compression, and
 an offline evaluation suite.

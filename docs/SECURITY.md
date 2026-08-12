@@ -1,5 +1,10 @@
 # PikaCore security boundary
 
+[English](SECURITY.md) | [简体中文](SECURITY_CN.md)
+
+The English documentation is canonical. Functional documentation changes must update
+the English and Simplified Chinese versions in the same pull request.
+
 PikaCore executes model-selected tools on the user's machine. Its controls reduce
 accidental workspace escape, unapproved mutation, and credential leakage, but they do
 not turn an untrusted model response or shell command into sandboxed code.
